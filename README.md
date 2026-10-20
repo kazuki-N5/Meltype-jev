@@ -13,9 +13,6 @@
   <a href="https://github.com/sponsors/yksr-melt"><img src="https://img.shields.io/badge/Sponsor-応援する-ff8ab4?logo=githubsponsors&logoColor=white" alt="GitHub Sponsors"></a>
 </p>
 
-> [!NOTE]
-> **これは [yksr-melt/Meltype](https://github.com/yksr-melt/Meltype) のフォーク「Jev 版」です。** 本家の作者の了承を得て公開しています。本家との違いは [Jev 版でできること](#jev-版でできること) にまとめています。
-
 <p align="center" style="display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
   <a href="https://trendshift.io/repositories/284759?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-284759" target="_blank" rel="noopener noreferrer">
     <img src="https://trendshift.io/api/badge/trendshift/repositories/284759/daily?language=C%23" alt="yksr-melt%2FMeltype | Trendshift" width="250" height="55"/>
