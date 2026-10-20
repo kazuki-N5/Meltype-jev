@@ -26,15 +26,16 @@ internal static class AppInfo
     public static string ReportUrl(string environment) => Config.ProjectInfo.ReportUrl(Diagnostics.ReportInfo.OsName, Version, environment);
 
     /// <summary>自動更新で最新のリリースを見に行く GitHub のリポジトリ (公開されている必要がある)。</summary>
-    public const string UpdateRepository = "yksr-melt/Meltype";
+    public const string UpdateRepository = "kazuki-N5/Meltype-jev";
     public const string Contact = "ibutya0319@gmail.com";
 
     public static string Version =>
         typeof(AppInfo).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "?";
 
     public static string AboutText => $"""
-        Meltype {Version}
+        Meltype {Version} (Jev 版)
         Copyright (C) 2026 雪代 / Yukishiro (@yksr_melt / @yksr-melt)
+        Jev 版の改変 (2026-10-20、yksr-melt/Meltype を改変): Copyright (C) 2026 kazuki-N5
 
         このプログラムはフリーソフトウェアです。GNU General Public License
         (バージョン 3、またはそれ以降のバージョン) の条件で再配布・改変できます。

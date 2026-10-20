@@ -13,6 +13,9 @@
   <a href="https://github.com/sponsors/yksr-melt"><img src="https://img.shields.io/badge/Sponsor-応援する-ff8ab4?logo=githubsponsors&logoColor=white" alt="GitHub Sponsors"></a>
 </p>
 
+> [!NOTE]
+> **これは [yksr-melt/Meltype](https://github.com/yksr-melt/Meltype) のフォーク「Jev 版」です。** 本家の作者の了承を得て公開しています。本家との違いは [Jev 版でできること](#jev-版でできること) にまとめています。
+
 <p align="center" style="display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;">
   <a href="https://trendshift.io/repositories/284759?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-284759" target="_blank" rel="noopener noreferrer">
     <img src="https://trendshift.io/api/badge/trendshift/repositories/284759/daily?language=C%23" alt="yksr-melt%2FMeltype | Trendshift" width="250" height="55"/>
@@ -42,6 +45,31 @@
 
 <p align="center">
   <img src="docs/images/demo.svg" alt="kyouhagoogledekensaku と打つと、今日はgoogleで検索 になる" width="640">
+</p>
+
+<br>
+
+### Jev 版でできること
+
+正しい候補が ↓ の一覧にあるのに、文脈に合わない候補が 1 番目に来ることがあります。Jev 版では、**1 回目の Space で各文節の候補を Jev (TypeSafe の決定モデル) に聞き、文に一番合う候補を 1 番目にします。** Jev が変えた文節は少し光ります。
+
+| 打った文 | Jev なし | Jev あり |
+|---|---|---|
+| きのうげーむをかった | **機能**ゲームを買った | 昨日ゲームを買った |
+| じはんきにこうかをいれた | 自販機に**効果**を入れた | 自販機に硬貨を入れた |
+| こうかいしてもおそい | **公開**しても遅い | 後悔しても遅い |
+| しんりをついきゅうする | **心理**を**追求**する | 真理を追究する |
+
+<sub>学習データを空にした状態で、Space の 1 回目の結果です。Jev なしで間違う 10 文のうち 7 文が全部正しくなりました (くわしくは本家への提案 [yksr-melt/Meltype#978](https://github.com/yksr-melt/Meltype/issues/978))。</sub>
+
+- 設定の「**Jev で変換候補を選ぶ (Windows・実験)**」を ON にしたときだけ動きます (最初は OFF)。接続先 (OpenRouter か TypeSafe 公式) と API キーも設定画面で入れます
+- **ON にすると、変換中の文の読みと候補が接続先に送られます。** OFF なら本家と同じく、打った文字は PC の外に出ません
+- 1 秒以内に答えが返らないときは、今までの変換のままです。料金は 1 回の変換で約 0.00003 ドルです
+- Windows だけです。自動更新はしないので、新しい版は [Releases](https://github.com/kazuki-N5/Meltype-jev/releases) から入れ直してください
+- くわしい使い方: [docs/USAGE.md](docs/USAGE.md#jev-で変換候補を選ぶ-windows実験)
+
+<p align="center">
+  <a href="https://github.com/kazuki-N5/Meltype-jev/releases/latest"><b>Jev 版をダウンロード</b></a>
 </p>
 
 <br><br>
@@ -217,6 +245,7 @@ Meltype キーボードのときは、<kbd>Ctrl</kbd> + <kbd>半角/全角</kbd>
 ```
 Meltype
 Copyright (C) 2026 雪代 / Yukishiro (@yksr_melt / @yksr-melt)
+Jev 版の改変 (2026-10-20): Copyright (C) 2026 kazuki-N5
 
 This program is free software: you can redistribute it and/or modify it under the terms of the
 GNU General Public License as published by the Free Software Foundation, either version 3 of the

@@ -1,12 +1,12 @@
 name: mac
 
 # Mac 版 (mac/) をビルドして、テスター向けの zip (Meltype.app + install.sh + 説明) を実行結果 (Artifacts) に置く。
-# Actions の画面から手動で実行するか、Mac 版・共通部分を変えて push したとき。タグ (v*) ならリリースにも添付する。
+# Actions の画面から手動で実行するか、Mac 版・共通部分を変えて push したとき。
+# Jev 版 (このフォーク) は Windows だけを配るので、タグ (v*) では動かさない (リリースに Mac 版を付けない)。
 on:
   workflow_dispatch:
   push:
     branches: ['**']
-    tags: ['v*']
     paths:
       - 'mac/**'
       - 'src/Meltype.Core/**'

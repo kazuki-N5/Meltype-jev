@@ -57,7 +57,7 @@ if (-not (Test-Path -LiteralPath $exe)) {
     Write-Host 'ウイルス対策ソフトが Meltype を止めた可能性があります。'
     Write-Host 'Windows セキュリティ →「ウイルスと脅威の防止」→「保護の更新」で定義を更新し、公式の ZIP を再ダウンロードして再検査してください。'
     Write-Host 'Windows セキュリティ →「ウイルスと脅威の防止」→「保護の履歴」で検出名を確認してください。誤検知かどうかは、この状態だけでは判断できません。'
-    Write-Host '保護を無効にしたり「許可」に変更したりせず、版と検出名を https://github.com/yksr-melt/Meltype/issues に報告してください (個人名やパスは隠してください)。'
+    Write-Host '保護を無効にしたり「許可」に変更したりせず、版と検出名を https://github.com/kazuki-N5/Meltype-jev/issues に報告してください (個人名やパスは隠してください)。'
     exit 1
 }
 
@@ -90,7 +90,7 @@ elseif (Test-Path -LiteralPath $uninstallSource) {
         InstallLocation = $target
         # PATH に PowerShell のフォルダーが無い PC もあるので、フルパスで書く
         UninstallString = "`"$(Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\WindowsPowerShell\v1.0\powershell.exe')`" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$uninstaller`" -FromSettings"
-        URLInfoAbout    = 'https://github.com/yksr-melt/Meltype'
+        URLInfoAbout    = 'https://github.com/kazuki-N5/Meltype-jev'
     }
     foreach ($name in $values.Keys) { Set-ItemProperty -Path $key -Name $name -Value $values[$name] }
     foreach ($name in 'NoModify', 'NoRepair') { Set-ItemProperty -Path $key -Name $name -Value 1 -Type DWord }

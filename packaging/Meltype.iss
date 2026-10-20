@@ -24,8 +24,8 @@ AppName=Meltype
 AppVersion={#AppVersion}
 AppVerName=Meltype {#AppVersion}
 AppPublisher=Yukishiro
-AppPublisherURL=https://github.com/yksr-melt/Meltype
-AppSupportURL=https://github.com/yksr-melt/Meltype/issues
+AppPublisherURL=https://github.com/kazuki-N5/Meltype-jev
+AppSupportURL=https://github.com/kazuki-N5/Meltype-jev/issues
 ; install.ps1 と同じ場所。管理者権限は使わない (現在のユーザーだけに入れる)
 PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\Meltype

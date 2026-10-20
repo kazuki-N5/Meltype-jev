@@ -2,7 +2,7 @@ name: linux
 
 # Linux 版 (linux/、IBus) をビルドして、テスター向けの zip と apt で入れられる .deb、dnf で入れられる .rpm を実行結果 (Artifacts) に置く。
 # Actions の画面から手動で実行するか、Linux 版・Mozc のヘルパー・共通部分を変えて push / Pull Request したとき。
-# タグ (v*) ならリリースにも添付する。
+# Jev 版 (このフォーク) は Windows だけを配るので、タグ (v*) では動かさない (リリースに Linux 版を付けない)。
 # Mozc のビルドは初回 30〜40 分かかるので、Bazel の結果をキャッシュして次から速くする。
 # pull_request でも流すのは、フォークからの Pull Request では push が起きず、Linux のテストが
 # CI で一度も走らないため (build.yml と同じ扱い)。
@@ -18,7 +18,6 @@ on:
       - '.github/workflows/linux.yml'
   push:
     branches: ['**']
-    tags: ['v*']
     paths:
       - 'linux/**'
       - 'native/mozc/**'

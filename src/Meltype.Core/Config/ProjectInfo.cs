@@ -9,7 +9,7 @@ namespace Meltype.Config;
 /// <summary>Windows 版・Mac 版・Linux 版で共通の、プロジェクトの情報と不具合報告の URL。</summary>
 public static class ProjectInfo
 {
-    public const string SourceUrl = "https://github.com/yksr-melt/Meltype";
+    public const string SourceUrl = "https://github.com/kazuki-N5/Meltype-jev";
 
     /// <summary>
     /// 不具合報告のフォーム (Google フォームの「事前入力した URL」。OS に Windows 11、版に 0.0.0、実行環境に ENV を入れて作ったもの)。
