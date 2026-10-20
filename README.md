@@ -47,6 +47,10 @@
   <img src="docs/images/demo.svg" alt="kyouhagoogledekensaku と打つと、今日はgoogleで検索 になる" width="640">
 </p>
 
+https://github.com/user-attachments/assets/9a71d337-99af-4560-ada2-3cf3eac953a6
+
+<p align="center"><sub>Jev 版: Space を押すと、文に合う候補に変わる (私は共サッカーを → わたしは今日サッカーを、機能ゲーム → 昨日ゲーム など)</sub></p>
+
 <br>
 
 ### Jev 版でできること
