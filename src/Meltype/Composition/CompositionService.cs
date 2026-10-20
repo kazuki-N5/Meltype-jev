@@ -55,6 +55,35 @@ internal sealed class CompositionService : ICompositionHost, IDisposable
         }
         return _zenzai;
     }
+
+    // Jev。設定が ON で API キーがあるときだけ作る (接続先かキーが変わったら作り直す)
+    private JevRanker? _jev;
+    private (Config.JevProvider Provider, string Key) _jevKey;
+    private JevRanker? CurrentJev(CompositionOptions options)
+    {
+        var provider = options.JevProvider();
+        var key = options.UseJev() ? JevApiKey(provider, options.JevApiKey()) : "";
+        if (key.Length == 0)
+        {
+            _jev?.Dispose();
+            _jev = null;
+            _jevKey = default;
+            return null;
+        }
+        if (_jevKey != (provider, key))
+        {
+            _jev?.Dispose();
+            _jev = new JevRanker(provider, key);
+            _jevKey = (provider, key);
+        }
+        return _jev;
+    }
+
+    /// <summary>設定の API キー。空なら接続先の環境変数 (OpenRouter は OPENROUTER_API_KEY、TypeSafe 公式は TYPESAFE_API_KEY)。</summary>
+    internal static string JevApiKey(Config.JevProvider provider, string configured) =>
+        configured.Trim() is { Length: > 0 } key ? key
+            : Environment.GetEnvironmentVariable(provider == Config.JevProvider.TypeSafe ? "TYPESAFE_API_KEY" : "OPENROUTER_API_KEY")?.Trim() ?? "";
+
     private readonly IME.Imm32ImeController _imm32 = new();
     private readonly System.Windows.Forms.Timer _tick = new() { Interval = 100 };
     private int _pumpScheduled;
@@ -131,6 +160,8 @@ internal sealed class CompositionService : ICompositionHost, IDisposable
             Predictor = options.Predictor ?? new Predictor(new PhraseHistory(Config.AppPaths.PhraseHistoryFile), UserDictionary, History),
             Predictions = options.Predictions,
             EnglishNamePredictions = options.EnglishNamePredictions,
+            Jev = () => CurrentJev(options),
+            JevCandidates = (reading, keep, count) => _hybrid.Candidates(reading, keep, count),
         };
         Phrases = resolved.Predictor?.Phrases;
         TranslationHistory = resolved.TranslationHistory;
@@ -926,6 +957,7 @@ internal sealed class CompositionService : ICompositionHost, IDisposable
         _windowsCandidates.Dispose();
         _mozc.Dispose();
         _zenzai?.Dispose();
+        _jev?.Dispose();
         _window.Dispose();
         _indicator.Dispose();
     }

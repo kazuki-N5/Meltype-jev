@@ -30,7 +30,12 @@ public sealed record CompositionView(
     /// 「表示中の preedit」をそのまま確定するので、表示と確定が違うと文書と本体の認識がずれる
     /// (「かn」を表示したまま確定すると、本体は「かん」で確定していて食い違う)。
     /// </summary>
-    string? Committed = null);
+    string? Committed = null,
+    /// <summary>
+    /// Jev が候補を変えた文節の番号 (Clauses の位置)。Space の 1 回目で変換したときの表示から、次のキーまでだけ入る (それ以外は null)。
+    /// 変換ボックス・Meltype IME は、これが入った表示が来たときに 1 回だけ、その文節を光らせる。
+    /// </summary>
+    IReadOnlyList<int>? JevClauses = null);
 
 /// <summary>CompositionController が外界とやり取りする口。テストでは偽物に差し替える。</summary>
 public interface ICompositionHost
@@ -114,6 +119,22 @@ public sealed record CompositionOptions
     public Func<bool> UseZenzai { get; init; } = () => false;
     public Func<string> ZenzaiServerPath { get; init; } = () => "";
     public Func<string> ZenzaiModelPath { get; init; } = () => "";
+
+    /// <summary>設定「Jev で変換候補を選ぶ」(Windows)。</summary>
+    public Func<bool> UseJev { get; init; } = () => false;
+
+    /// <summary>設定「Jev: 接続先」と「Jev: API キー」(空なら環境変数を使う)。</summary>
+    public Func<Config.JevProvider> JevProvider { get; init; } = () => Config.JevProvider.OpenRouter;
+    public Func<string> JevApiKey { get; init; } = () => "";
+
+    /// <summary>Space で変換を始めたときに候補を選ばせる Jev。使わないときは null。</summary>
+    public Func<JevRanker?> Jev { get; init; } = () => null;
+
+    /// <summary>
+    /// Jev の選択肢にする候補 (読み, 残す条件, 数)。変換ボックスで ↓ を押したときと同じ並びで、条件に合うものを数だけ返す。
+    /// null なら MoreCandidates を絞って使う。
+    /// </summary>
+    public Func<string, Func<string, bool>, int, IReadOnlyList<string>>? JevCandidates { get; init; }
 
     /// <summary>英数 (直接入力) 状態か。</summary>
     public Func<bool> DirectMode { get; init; } = () => false;
@@ -549,6 +570,7 @@ public sealed class CompositionController
         _clauses = [];
         _spaceStartedConversion = false;
         _tabStartedConversion = false;
+        EndJevView();
     }
 
     /// <summary>フォーカスが変わったときなど。前の入力欄の文脈を持ち越さない。</summary>
@@ -606,6 +628,8 @@ public sealed class CompositionController
         }
         // 押したままの Shift のリピートは数えない。最初の押下はアプリに届いているので、離したことも伝える (issue #617)。
         if (!IsShift(vk) || !_host.IsShiftDown()) _capturedDown.Add(vk);
+        // Space の 1 回目の Jev の表示 (候補の一覧を出さない・光らせる) は、次のキーで終わる
+        if (!VirtualKeys.IsModifier(vk)) EndJevView();
 
         if (_heldLetters.Length > 0)
         {
@@ -1098,6 +1122,8 @@ public sealed class CompositionController
             _text.FollowingEnglish = LanguageOfStart(after);
             UpdateView();
         });
+        // Space で Jev に聞くときに接続を作る時間を待たないよう、変換ボックスを開いたときに作っておく (打った文字は送らない)
+        _options.Jev()?.WarmUp();
     }
 
     /// <summary>
@@ -1533,6 +1559,7 @@ public sealed class CompositionController
     /// </summary>
     private void StartConversion(bool preferJapanese = false)
     {
+        var started = Environment.TickCount64;
         _tabStartedConversion = false;
         // 子音の略入力 (ast → 明日): 打った英字全体が candidates.txt の英字の読みにあれば、それを 1 つの文節の候補にする (issue #62)
         if (!_text.KanaInput && _text.Mode == DisplayMode.Auto && _text.Raw is { Length: >= 2 } typedRaw && typedRaw.All(char.IsAsciiLetter) &&
@@ -1610,6 +1637,9 @@ public sealed class CompositionController
             }
             clauses.AddRange(japanese);
         }
+        // 設定で Jev を使うときは、Space の 1 回目は変換だけを見せ、候補の一覧は 2 回目の Space / ↓ から出す
+        var jevOn = _spaceStartedConversion && _options.Jev() is { IsAvailable: true };
+        var jevPicks = jevOn ? ApplyJev(clauses, started) : null;
         if (clauses.Count == 0) return;
         // 変換したあとに続けて打っていたら、前に選んでいた候補を同じ読みの文節で使う
         foreach (var clause in clauses)
@@ -1619,6 +1649,86 @@ public sealed class CompositionController
         _clauses = clauses;
         _selectedClause = 0;
         _converting = true;
+        _jevView = jevOn;
+        // 前に選び直した候補 (_keptChoices) が優先されて Jev の答えでなくなった文節は光らせない
+        _jevClauses = jevPicks?.Where(p => clauses[p.Key].Text == p.Value).Select(p => p.Key).Order().ToList() ?? [];
+    }
+
+    // Space の 1 回目で Jev を使って変換した直後の表示か (次のキーまで)。この間は候補の一覧を出さない
+    private bool _jevView;
+    // そのとき Jev が候補を変えた文節の番号 (変換ボックスで光らせる)
+    private List<int> _jevClauses = [];
+
+    private void EndJevView()
+    {
+        _jevView = false;
+        _jevClauses = [];
+    }
+
+    /// <summary>選択肢の数の上限 (今の 1 番目を含む)。</summary>
+    private const int JevOptionCount = 10;
+
+    /// <summary>
+    /// Space を押してから Jev の答えを使える締め切り。過ぎたら Jev をあきらめて今までどおりに変換する。
+    /// Meltype IME は Space の応答を 1300ms まで待つ (ほかのキーは 800ms)。Jev を使うときは Space の 1 回目で候補の一覧を作らない
+    /// (Windows の変換候補 API を呼ばない) ので、締め切りの後は 30ms ほどで返る。
+    /// </summary>
+    private const int JevDeadlineMs = 1000;
+
+    /// <summary>残り時間がこれより短ければ聞かない (Jev の最速が約 300ms)。</summary>
+    private const int JevMinimumMs = 300;
+
+    /// <summary>
+    /// Space で変換を始めたとき、変換中の文の読みと英語以外の全部の文節の候補を Jev に 1 回で聞き、各文節を Jev が選んだ候補にする。
+    /// 今の変換 (Mozc などの 1 番目) は Jev に見せない: 文や前後の文節に今の変換を入れると、Jev はそれを正しいものとして選びやすく、
+    /// 間違った文節に引っ張られる (公開しても遅い → 後悔しても を選ばない)。そのため、選択肢の文も聞く文節だけを候補にし、ほかは読みのままにする。
+    /// 間に合わない・使えないときは何もしない (今までどおりの変換)。変えた文節の番号と候補を返す (変えなければ null)。
+    /// </summary>
+    private Dictionary<int, string>? ApplyJev(List<Clause> clauses, long started)
+    {
+        if (_options.Jev() is not { IsAvailable: true } jev) return null;
+        var questions = new List<JevQuestion>();
+        for (var i = 0; i < clauses.Count; i++)
+        {
+            var clause = clauses[i];
+            if (clause.IsEnglish) continue;
+            var options = JevOptions(clause);
+            if (options.Count < 2) continue;
+            var before = string.Concat(clauses.Take(i).Select(c => c.Reading));
+            var after = string.Concat(clauses.Skip(i + 1).Select(c => c.Reading));
+            questions.Add(new JevQuestion(i, clause.Reading, options.Select(o => (o, before + o + after)).ToList()));
+        }
+        if (questions.Count == 0) return null;
+        var remaining = JevDeadlineMs - (Environment.TickCount64 - started);
+        if (remaining < JevMinimumMs) return null;
+        var reading = string.Concat(clauses.Select(c => c.Reading));
+        if (jev.Choose(reading, questions, TimeSpan.FromMilliseconds(remaining)) is not { } picks) return null;
+        var changed = new Dictionary<int, string>();
+        foreach (var (index, text) in picks)
+        {
+            if (clauses[index].Text == text) continue;
+            Prefer(clauses[index], text);
+            changed[index] = text;
+        }
+        return changed;
+    }
+
+    /// <summary>
+    /// Jev の選択肢: 今の 1 番目と、↓ の一覧の上から、漢字を含む候補・読みそのもの (カタカナ・半角の言い換えは入れない) を合わせて JevOptionCount 個まで。
+    /// 同じ候補 (今の 1 番目・Mozc と Microsoft IME の両方にあるもの) は 1 つにして、その分も後ろの候補で埋める。
+    /// </summary>
+    private List<string> JevOptions(Clause clause)
+    {
+        var reading = clause.Reading;
+        var current = clause.Text;
+        var readingHasDigit = reading.Any(char.IsDigit);
+        // 日付・時刻 (きのう → 2026年10月19日) のように、読みに無い数字を足した候補は入れない
+        bool Keep(string candidate) => candidate != current && (candidate == reading ||
+            candidate.Any(KanaChars.IsKanji) && (readingHasDigit || !candidate.Any(char.IsDigit)));
+        var others = _options.JevCandidates is { } pick
+            ? pick(reading, Keep, JevOptionCount - 1)
+            : (_options.MoreCandidates?.Invoke(reading) ?? []).Where(Keep).Distinct().Take(JevOptionCount - 1).ToList();
+        return [current, .. others];
     }
 
     /// <summary>
@@ -2914,21 +3024,30 @@ public sealed class CompositionController
         if (_converting && _clauses.Count > 0)
         {
             var selected = _clauses[_selectedClause];
+            var text = string.Concat(_clauses.Select(c => c.Text));
+            const string hint = "←→ 文節　Space/↓ 候補　1〜9 選択　Shift+←→ 区切り　Enter 確定　Esc 戻る";
+            if (_jevView)
+            {
+                // Jev を使った Space の 1 回目: 変換だけを見せる (候補の一覧・打ったキーの欄も出さない。一覧は次の Space / ↓ で取りに行く)
+                _host.Show(new CompositionView(text, [], -1, true, hint, _clauses.Select(c => c.Text).ToList(), _selectedClause,
+                    Suggestion: MisspellingSuggestion(), Committed: text, JevClauses: _jevClauses.Count > 0 ? _jevClauses : null));
+                return;
+            }
             // 選んでいる文節は、最初から候補の一覧をすべて出す (Space を 1 回押しただけでは一部しか出ず、選び間違えやすかった)。
             if (!selected.IsEnglish && !selected.Expanded) Expand(selected);
             _host.Show(new CompositionView(
-                string.Concat(_clauses.Select(c => c.Text)),
+                text,
                 selected.Candidates,
                 selected.Index,
                 true,
-                "←→ 文節　Space/↓ 候補　1〜9 選択　Shift+←→ 区切り　Enter 確定　Esc 戻る",
+                hint,
                 _clauses.Select(c => c.Text).ToList(),
                 _selectedClause,
                 CandidateNotes(selected),
                 _options.CandidateMeanings() ? CandidateMeaning(selected) : null,
                 MisspellingSuggestion(),
                 Typed: TypedKeys(),
-                Committed: string.Concat(_clauses.Select(c => c.Text))));
+                Committed: text));
         }
         else
         {

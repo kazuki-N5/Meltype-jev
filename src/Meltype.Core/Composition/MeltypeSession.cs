@@ -85,6 +85,17 @@ public sealed record SessionResult(bool Consumed, IReadOnlyList<TextEdit> Commit
         builder.Append(",\"typed\":");
         if (view.Typed is { } typed) AppendString(builder, typed);
         else builder.Append("null");
+        // Jev が候補を変えた文節の番号 (Space の 1 回目の表示だけ。無ければ入れない)
+        if (view.JevClauses is { } jevClauses)
+        {
+            builder.Append(",\"jevClauses\":[");
+            for (var i = 0; i < jevClauses.Count; i++)
+            {
+                if (i > 0) builder.Append(',');
+                builder.Append(jevClauses[i]);
+            }
+            builder.Append(']');
+        }
         builder.Append("}}");
         return builder.ToString();
     }

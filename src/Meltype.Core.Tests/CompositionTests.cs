@@ -244,7 +244,7 @@ internal static class CompositionTests
         public Keyboard(bool live = false, bool direct = false, ConversionHistory? history = null, IKanjiConverter? converter = null,
             Func<string, IReadOnlyList<string>>? moreCandidates = null, UserDictionary? userDictionary = null, LanguageMemory? languages = null,
             TranslationDictionary? translations = null, TranslationHistory? translationHistory = null, bool slashAsMiddleDot = false, Predictor? predictor = null,
-            Func<DateTime>? now = null, bool showTypedKeys = false, bool tabConversion = false, bool englishNamePredictions = false)
+            Func<DateTime>? now = null, bool showTypedKeys = false, bool tabConversion = false, bool englishNamePredictions = false, JevRanker? jev = null)
         {
             Direct = direct;
             Controller = new CompositionController(Gate, Detector, converter ?? Converter, Host, new CompositionOptions
@@ -304,6 +304,7 @@ internal static class CompositionTests
                 SeparateKeyRoles = () => SeparateKeyRoles,
                 EnglishFirstInput = () => EnglishFirstInput,
                 ConsonantAbbreviations = () => ConsonantAbbreviations,
+                Jev = () => jev,
             });
             Controller.Committed += Sigil.Append;
             Host.Replayed += e =>
@@ -4596,5 +4597,198 @@ internal static class CompositionTests
         var text = new CompositionText(Detector);
         foreach (var c in "suityoku") text.Append(c);
         Assert.Equal("JA:suityoku", string.Join(" | ", text.Segments(final: true).Select(s => (s.IsEnglish ? "EN:" : "JA:") + s.Raw)));
+    }
+
+    /// <summary>「私は | 共サッカーを | します」と「今日は | google | で | 検索する」に区切る変換エンジン (Jev のテスト用)。</summary>
+    private static ClauseConverter JevConverter() => new(new()
+    {
+        ["わたしはきょうさっかーをします"] = [new("わたしは", "私は"), new("きょうさっかーを", "共サッカーを"), new("します", "します")],
+        ["きょうさっかーを"] = [new("きょうさっかーを", "共サッカーを")],
+        ["きょうさっかーをします"] = [new("きょうさっかーを", "共サッカーを"), new("します", "します")],
+        ["でけんさくする"] = [new("で", "で"), new("けんさくする", "検索する")],
+    });
+
+    /// <summary>↓ で出る候補の一覧 (Mozc の候補の後ろに Microsoft IME の候補)。</summary>
+    private static IReadOnlyList<string> JevMoreCandidates(string reading) => reading switch
+    {
+        "わたしは" => ["私は", "わたしは", "渡しは", "渡は", "渡氏は"],
+        "きょうさっかーを" => ["共サッカーを", "きょうさっかーを", "京サッカーを", "強サッカーを", "今日サッカーを"],
+        "します" => ["します", "死ます", "歯ます", "市ます"],
+        "きょうは" => ["今日は", "きょうは", "京は"],
+        "けんさくする" => ["検索する", "けんさくする", "献策する"],
+        _ => [],
+    };
+
+    /// <summary>Jev が「きょうさっかーを」の文節に 今日サッカーを を選ぶ (文節の番号は問わない)。</summary>
+    private static JevRankerTests.FakeJev SoccerJev() => new()
+    {
+        Reply = _ => (System.Net.HttpStatusCode.OK, JevRankerTests.Answers(("c0", "今日サッカーを"), ("c1", "今日サッカーを"))),
+    };
+
+    private static List<JevRankerTests.SentRequest> Posts(JevRankerTests.FakeJev jev) => jev.Requests.Where(r => r.Method == HttpMethod.Post).ToList();
+
+    [Test]
+    public static void Jev_FirstSpace_UsesJevsChoiceForEveryClause()
+    {
+        var fake = SoccerJev();
+        using var jev = new JevRanker("key", fake);
+        var k = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: jev);
+        k.Type("watashihakyousakka-woshimasu ");
+        Assert.Equal("私は|今日サッカーを|します", string.Join("|", k.Host.View!.Clauses!), "全部の文節を 1 回で聞いて、Jev が選んだ候補を 1 番目にする");
+        Assert.Equal(0, k.Host.View.SelectedClause, "最初の文節を選んだ状態");
+        var post = Posts(fake).Single();
+        using var body = System.Text.Json.JsonDocument.Parse(post.Body!);
+        var questions = body.RootElement.GetProperty("questions");
+        Assert.Equal("c0,c1,c2", string.Join(",", questions.EnumerateObject().Select(q => q.Name)), "3 文節を 1 回で");
+        var c1 = questions.GetProperty("c1").GetProperty("criteria").EnumerateObject().Select(p => p.Name).ToList();
+        Assert.Equal(5, c1.Count, "今の 1 番目と、↓ の一覧で条件に合う 4 つ: " + string.Join(",", c1));
+        Assert.True(c1.Contains("共サッカーを") && c1.Contains("今日サッカーを") && c1.Contains("きょうさっかーを"), string.Join(",", c1));
+        // 今の変換 (共サッカーを) は Jev に見せない: 文は読み、選択肢の文も聞く文節だけを候補にして、ほかの文節は読みのまま
+        Assert.Equal("日本語入力で変換中の文: わたしはきょうさっかーをします", body.RootElement.GetProperty("state").GetString());
+        Assert.Equal("わたしは今日サッカーをします", questions.GetProperty("c1").GetProperty("criteria").GetProperty("今日サッカーを").GetString());
+        Assert.Equal("私はきょうさっかーをします", questions.GetProperty("c0").GetProperty("criteria").GetProperty("私は").GetString());
+
+        // 2 回目以降の Space は今までどおり次の候補 (Jev には聞き直さない)
+        k.Press(VirtualKeys.Right);
+        k.Type(" ");
+        Assert.Equal("共サッカーを", k.Host.View!.Clauses![1], "Jev が選ぶ前の 1 番目");
+        Assert.Equal(1, Posts(fake).Count, "2 回目は送らない");
+        k.Type("\n");
+        Assert.Equal("私は共サッカーをします", k.Host.Document);
+    }
+
+    [Test]
+    public static void Jev_FirstSpace_HidesTheCandidateListAndMarksChangedClauses()
+    {
+        var fake = SoccerJev();
+        using var jev = new JevRanker("key", fake);
+        var k = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, showTypedKeys: true, jev: jev);
+        k.Type("watashihakyousakka-woshimasu ");
+        var first = k.Host.View!;
+        Assert.True(first.Converting && first.Candidates.Count == 0, "Space の 1 回目は候補の一覧を出さない: " + string.Join(",", first.Candidates));
+        Assert.True(first.Typed is null, "打ったキーの欄も出さない (Meltype IME はこれだけでも一覧の窓を出す)");
+        Assert.Equal("1", string.Join(",", first.JevClauses ?? []), "Jev が変えた文節 (今日サッカーを) だけ光らせる");
+        Assert.True(new SessionResult(true, [], first).ToJson().Contains("\"jevClauses\":[1]"), "Meltype IME にも渡す");
+
+        // 2 回目の Space で、今の文節の一覧を出して次の候補へ (光らせるのは 1 回だけ)
+        k.Type(" ");
+        var second = k.Host.View!;
+        Assert.True(second.Candidates.Count > 1, "2 回目の Space で一覧を出す");
+        Assert.Equal("わたしは", second.Clauses![0], "次の候補");
+        Assert.True(second.JevClauses is null, "次のキーで光らせるのをやめる");
+        Assert.True(!new SessionResult(true, [], second).ToJson().Contains("jevClauses"), "無いときは JSON に入れない");
+
+        // Jev が答えなくても、Jev を使う設定なら 1 回目は一覧を出さない。Jev を使わなければ今までどおり 1 回目から出す
+        var failing = new JevRankerTests.FakeJev { Reply = _ => (System.Net.HttpStatusCode.InternalServerError, "") };
+        using var silent = new JevRanker("key", failing);
+        var s = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: silent);
+        s.Type("watashihakyousakka-woshimasu ");
+        Assert.True(s.Host.View!.Candidates.Count == 0 && s.Host.View.JevClauses is null, "答えが無ければ光らせない");
+        var off = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates);
+        off.Type("watashihakyousakka-woshimasu ");
+        Assert.True(off.Host.View!.Candidates.Count > 1, "Jev を使わなければ 1 回目から一覧を出す");
+    }
+
+    [Test]
+    public static void Jev_OptionsAreTheFirstTenDistinctCandidates()
+    {
+        // 選択肢は今の 1 番目を含めて 10 個まで。同じ候補は 1 つにし、その分は後ろの候補で埋める。カタカナだけの候補は入れない
+        var fake = new JevRankerTests.FakeJev { Reply = _ => (System.Net.HttpStatusCode.OK, JevRankerTests.Answers()) };
+        using var jev = new JevRanker("key", fake);
+        string[] more = ["川", "皮", "河", "革", "側", "川", "皮", "カワ", "かわ", "佳和", "香輪", "可和", "嘉和", "華和", "加和"];
+        var k = new Keyboard(moreCandidates: r => r == "かわ" ? more : [], jev: jev);
+        k.Type("kawa ");
+        using var body = System.Text.Json.JsonDocument.Parse(Posts(fake).Single().Body!);
+        var options = body.RootElement.GetProperty("questions").GetProperty("c0").GetProperty("criteria").EnumerateObject().Select(p => p.Name).ToHashSet();
+        Assert.True(options.SetEquals(["川", "皮", "河", "革", "側", "かわ", "佳和", "香輪", "可和", "嘉和"]), "先頭から重なりを除いて 10 個: " + string.Join(",", options));
+
+        // アプリで使う HybridConverter の絞り込みも、重なりを除いて数をそろえる
+        var hybrid = new HybridConverter(() => Meltype.Config.ConversionEngine.Hybrid, null, new FakeConverter(), _ => ["川", "皮", "川", "河", "革"]);
+        Assert.Equal("川,皮,河", string.Join(",", hybrid.Candidates("かわ", _ => true, 3)), "重なりを除いて 3 個");
+    }
+
+    [Test]
+    public static void Jev_IsNotAskedWhenConversionStartsWithArrowKeys()
+    {
+        var fake = SoccerJev();
+        using var jev = new JevRanker("key", fake);
+        var k = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: jev);
+        k.Type("watashihakyousakka-woshimasu");
+        k.Press(VirtualKeys.Left);
+        Assert.True(k.Host.View!.Converting, "← で変換を始める");
+        Assert.Equal("私は|共サッカーを|します", string.Join("|", k.Host.View.Clauses!));
+        Assert.Equal(0, Posts(fake).Count, "← で始めたときは送らない");
+    }
+
+    [Test]
+    public static void Jev_FailureOrNoJev_KeepsTheUsualConversion()
+    {
+        var failing = new JevRankerTests.FakeJev { Reply = _ => (System.Net.HttpStatusCode.InternalServerError, "") };
+        using var jev = new JevRanker("key", failing);
+        var k = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: jev);
+        k.Type("watashihakyousakka-woshimasu ");
+        Assert.Equal("私は|共サッカーを|します", string.Join("|", k.Host.View!.Clauses!), "Jev が答えなければ今までどおり");
+        Assert.Equal(1, Posts(failing).Count);
+
+        var none = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates);
+        none.Type("watashihakyousakka-woshimasu ");
+        Assert.Equal("私は|共サッカーを|します", string.Join("|", none.Host.View!.Clauses!), "Jev が無ければ今までどおり");
+    }
+
+    [Test]
+    public static void Jev_EnglishClause_IsInTheSentenceButNotAsked()
+    {
+        var fake = new JevRankerTests.FakeJev { Reply = _ => (System.Net.HttpStatusCode.OK, JevRankerTests.Answers()) };
+        using var jev = new JevRanker("key", fake);
+        var k = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: jev);
+        k.Type("kyouhagoogledekensakusuru ");
+        var clauses = k.Host.View!.Clauses!;
+        var english = clauses.ToList().IndexOf("google");
+        Assert.True(english > 0, "英語の文節がある: " + string.Join("|", clauses));
+        using var body = System.Text.Json.JsonDocument.Parse(Posts(fake).Single().Body!);
+        Assert.Equal("日本語入力で変換中の文: きょうはgoogleでけんさくする", body.RootElement.GetProperty("state").GetString(), "英語の文節も (打ったまま) 文に入れる");
+        var asked = body.RootElement.GetProperty("questions").EnumerateObject().Select(q => q.Name).ToList();
+        Assert.True(!asked.Contains("c" + english), "英語の文節は聞かない: " + string.Join(",", asked));
+        Assert.True(asked.Count > 0, "日本語の文節は聞く");
+    }
+
+    [Test]
+    public static void Jev_ChoiceKeptBeforeContinuingToType_Wins()
+    {
+        // 設定「変換したあとに続けて打っても確定しない」: 続けて打つ前に選び直した候補は、Jev の答えより優先する
+        var fake = SoccerJev();
+        using var jev = new JevRanker("key", fake);
+        var k = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: jev) { ContinueAfterConversion = true };
+        k.Type("kyousakka-wo ");
+        Assert.Equal("今日サッカーを", k.Showing, "Jev の答え");
+        k.Type(" ");
+        Assert.Equal("共サッカーを", k.Showing, "選び直す");
+        k.Type("shimasu ");
+        Assert.Equal(2, Posts(fake).Count, "続けて打った文は聞き直す");
+        Assert.Equal("共サッカーを|します", string.Join("|", k.Host.View!.Clauses!), "選び直した候補が優先");
+    }
+
+    [Test]
+    public static void Jev_TooSlow_ConvertsWithinTheDeadline()
+    {
+        // Jev が 1 秒たっても答えなければ、あきらめて今までどおりに変換する (Meltype IME は Space の応答を 1300ms まで待つ)
+        var slow = SoccerJev();
+        slow.DelayMs = 1500;
+        using var jev = new JevRanker("key", slow);
+        var k = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: jev);
+        k.Type("watashihakyousakka-woshimasu");
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        k.Type(" ");
+        watch.Stop();
+        Assert.Equal("私は|共サッカーを|します", string.Join("|", k.Host.View!.Clauses!), "間に合わなければ今までどおり");
+        Assert.True(watch.ElapsedMilliseconds is >= 700 and < 1300, $"1 秒の締め切りまで待って返る: {watch.ElapsedMilliseconds}ms");
+
+        // 1 秒以内なら Jev の答えを使う (前の締め切り 700ms では間に合わなかった遅さ)
+        var late = SoccerJev();
+        late.DelayMs = 800;
+        using var lateJev = new JevRanker("key", late);
+        var l = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: lateJev);
+        l.Type("watashihakyousakka-woshimasu ");
+        Assert.Equal("私は|今日サッカーを|します", string.Join("|", l.Host.View!.Clauses!), "0.8 秒で返った答えは使う");
     }
 }

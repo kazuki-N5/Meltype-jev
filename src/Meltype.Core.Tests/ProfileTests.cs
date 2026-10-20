@@ -82,7 +82,9 @@ internal static class ProfileTests
         a.LiveConversion = false;
         a.AppKinds.Add(new AppKind { Name = "チャット" });
         a.FileLog = true;
+        a.JevApiKey = "sk-or-secret";
         var file = a.ExportProfile();
+        Assert.True(!file.Contains("sk-or-secret"), "Jev の API キーは人に渡すファイルに入れない");
 
         // B さんが読み込む: 新しいプロファイルとして足して切り替える。共通の項目 (ログ) は B さんのまま
         var b = new Settings().Normalize();
@@ -92,6 +94,8 @@ internal static class ProfileTests
         Assert.True(!imported.LiveConversion, "ライブ変換 OFF も入る");
         Assert.Equal("チャット", imported.AppKinds.Single().Name);
         Assert.True(!imported.FileLog, "ログは共通の項目なので読み込まない");
+        Assert.Equal("", imported.JevApiKey, "API キーも共通の項目なので B さんのまま");
+        Assert.Equal("sk-or-secret", a.SwitchProfile("標準").JevApiKey, "プロファイルを切り替えてもキーはそのまま");
         Assert.True(imported.SwitchProfile("標準").LiveConversion, "前からのプロファイルはそのまま");
 
         // 同じ名前があれば (2) を付ける

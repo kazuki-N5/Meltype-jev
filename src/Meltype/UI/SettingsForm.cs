@@ -387,6 +387,14 @@ internal sealed class SettingsForm : Form, IMessageFilter
                 s => text.Text = (string?)property.GetValue(s) ?? "",
                 s => property.SetValue(s, text.Text.Trim()));
         }
+        if (type == typeof(string) && property.Name == nameof(Settings.JevApiKey))
+        {
+            // 画面を見られても読めないように伏せ字にする。貼り付けたキーの前後の空白は落とす
+            var box = new TextBox { Width = 300, Anchor = AnchorStyles.Left, UseSystemPasswordChar = true, PlaceholderText = "空なら環境変数" };
+            return new Binding(property, box,
+                s => box.Text = (string?)property.GetValue(s) ?? "",
+                s => property.SetValue(s, box.Text.Trim()));
+        }
         if (type == typeof(string))
         {
             // 入力モードの表示の色・定型文を出す記号など

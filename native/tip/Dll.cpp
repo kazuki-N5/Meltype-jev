@@ -9,6 +9,7 @@
 #include <cstdarg>
 
 #include "CandidateWindow.h"
+#include "GlowWindow.h"
 #include "Globals.h"
 #include "TextService.h"
 
@@ -231,6 +232,7 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
             break;
         case DLL_PROCESS_DETACH:
             CandidateWindow::UnregisterClasses();
+            GlowWindow::UnregisterClasses();
             break;
     }
     return TRUE;

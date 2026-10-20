@@ -305,6 +305,7 @@ STDMETHODIMP TextService::ActivateEx(ITfThreadMgr* threadMgr, TfClientId clientI
     open_ = !disabled_;
 
     candidates_ = std::make_unique<CandidateWindow>([this](int index, bool prediction) { SelectCandidate(index, prediction); });
+    glow_ = std::make_unique<GlowWindow>();
 
     if (!disabled_) {
         langBar_ = new LangBarButton(this);
@@ -353,6 +354,7 @@ STDMETHODIMP TextService::Deactivate() {
     abandoned_.clear();
     pipe_.Close();
     candidates_.reset();
+    glow_.reset();
     UnadviseTextEditSink();
 
     if (langBar_ != nullptr) {
@@ -419,12 +421,14 @@ STDMETHODIMP TextService::OnSetFocus(ITfDocumentMgr* focus, ITfDocumentMgr*) {
     caretMoved_ = true;
     ForgetSecretField();
     if (candidates_) candidates_->Hide();
+    HideGlow();
     AdviseTextEditSink(focus);
     return S_OK;
 }
 
 STDMETHODIMP TextService::OnSetFocus(BOOL foreground) {
     if (!foreground && candidates_) candidates_->Hide();
+    if (!foreground) HideGlow();
     // 別アプリの設定画面から戻ったとき、キー入力の前に最新設定を読み直す。
     if (foreground && !disabled_) Hello();
     // キーを受け取らなくなった (スレッドが前面でなくなった・ほかの IME に移った): 受け取ったキーを離したことは届かないかもしれないので忘れる
@@ -921,7 +925,9 @@ void TextService::HandleKey(ITfContext* context, UINT vk, wchar_t ch) {
         }
         request += "}";
         JsonValue reply;
-        if (!Request(request, reply)) {
+        // Space は、設定で Jev (Meltype.exe がネットの先に変換候補を選ばせる) を使うと 1 秒まで待つことがあるので、長めに待つ
+        // (ほかのキーは今までどおり 800ms。Meltype.exe が固まったときに、打つたびに長く止まらないように)
+        if (!Request(request, reply, vk == VK_SPACE ? 1300 : 800)) {
             // Meltype.exe が応答しない: 変換中の文字はそのまま確定する。打った文字はここで入れる
             // (送り直すと、その間に打った次のキーより後に届いて順番が入れ替わる)
             keyFailed_ = true;
@@ -929,6 +935,7 @@ void TextService::HandleKey(ITfContext* context, UINT vk, wchar_t ch) {
             // 次のキーで、すぐに問い合わせ直す (Meltype.exe の画面のスレッドが少しふさがっただけなら、次のキーから使える)
             lastHello_ = 0;
             if (candidates_) candidates_->Hide();
+            HideGlow();
             EndComposition(ec);
             // Ctrl・Alt・Windows キーとの組み合わせは、文字を入れずにアプリに送り直す
             if (ch >= 0x20 && (mods & (2 | 4 | 8)) == 0) {
@@ -1197,6 +1204,7 @@ void TextService::Apply(TfEditCookie ec, ITfContext* context, const JsonValue& r
     if (!view.IsNull() && !view[L"text"].Str().empty()) {
         ApplyComposition(ec, context, view);
         ShowCandidates(ec, context, view);
+        ShowGlow(ec, context, view);
     } else {
         if (composition_ != nullptr) {
             // 変換中の文字を消した (BackSpace で全部消した・Esc で取り消した)。
@@ -1209,6 +1217,7 @@ void TextService::Apply(TfEditCookie ec, ITfContext* context, const JsonValue& r
             EndComposition(ec);
         }
         if (candidates_) candidates_->Hide();
+        HideGlow();
     }
 }
 
@@ -1401,6 +1410,7 @@ STDMETHODIMP TextService::OnCompositionTerminated(TfEditCookie ec, ITfCompositio
         compositionContext_ = nullptr;
     }
     if (candidates_) candidates_->Hide();
+    HideGlow();
     staleCommitTries_ = 0;
     staleVk_ = 0;
     lastConverting_ = false;
@@ -1503,6 +1513,7 @@ void TextService::AbandonComposition() {
     staleCommitTries_ = 0;
     staleVk_ = 0;
     if (candidates_) candidates_->Hide();
+    HideGlow();
     directEnglishWord_ = false;
     caretMoved_ = true;
     JsonValue reply;
@@ -1558,6 +1569,7 @@ void TextService::CommitInSession(TfEditCookie ec, ITfContext* context, bool kee
         EndComposition(ec);
     }
     if (candidates_) candidates_->Hide();
+    HideGlow();
 }
 
 void TextService::SelectCandidate(int index, bool prediction) {
@@ -1652,6 +1664,54 @@ void TextService::ShowCandidates(TfEditCookie ec, ITfContext* context, const Jso
         }
     }
     candidates_->Show(data, anchor);
+}
+
+void TextService::ShowGlow(TfEditCookie ec, ITfContext* context, const JsonValue& view) {
+    if (!glow_) return;
+    const std::wstring& text = view[L"text"].Str();
+    const auto& jev = view[L"jevClauses"].array;
+    bool start = !jev.empty() && !lastJev_;
+    lastJev_ = !jev.empty();
+    if (!start) {
+        // 同じ表示が続くときは光らせ直さない。変換中の文字が変わったら止める
+        if (glow_->Playing() && text != glowText_) glow_->Hide();
+        return;
+    }
+    glowText_ = text;
+    // Jev が変えた文節の画面上の位置 (文節の文字は、変換中の文字の中に順に並んでいる)
+    std::vector<RECT> rects;
+    const auto& clauses = view[L"clauses"].array;
+    Microsoft::WRL::ComPtr<ITfRange> range;
+    Microsoft::WRL::ComPtr<ITfContextView> contextView;
+    if (composition_ != nullptr && SUCCEEDED(composition_->GetRange(&range)) && SUCCEEDED(context->GetActiveView(&contextView))) {
+        for (const JsonValue& item : jev) {
+            int index = item.Int();
+            if (index < 0 || index >= static_cast<int>(clauses.size())) continue;
+            LONG offset = 0;
+            for (int i = 0; i < index; i++) offset += static_cast<LONG>(clauses[i].Str().size());
+            Microsoft::WRL::ComPtr<ITfRange> clause;
+            if (FAILED(range->Clone(&clause))) continue;
+            LONG moved = 0;
+            clause->Collapse(ec, TF_ANCHOR_START);
+            clause->ShiftEnd(ec, offset + static_cast<LONG>(clauses[index].Str().size()), &moved, nullptr);
+            clause->ShiftStart(ec, offset, &moved, nullptr);
+            RECT rect = {};
+            BOOL clipped = FALSE;
+            if (SUCCEEDED(contextView->GetTextExt(ec, clause.Get(), &rect, &clipped)) && !IsRectEmpty(&rect)) rects.push_back(rect);
+        }
+    }
+    // 位置が分からないアプリでは光らせない
+    if (rects.empty()) {
+        glow_->Hide();
+        return;
+    }
+    glow_->Play(rects);
+}
+
+void TextService::HideGlow() {
+    if (glow_) glow_->Hide();
+    lastJev_ = false;
+    glowText_.clear();
 }
 
 // ---- 下線の種類 ----

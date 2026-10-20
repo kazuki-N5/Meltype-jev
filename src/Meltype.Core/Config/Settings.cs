@@ -81,6 +81,15 @@ public enum ConversionEngine
     [Description("Microsoft IME")] System,
 }
 
+/// <summary>Jev に問い合わせる先。どちらも同じ Jev (TypeSafe の決定モデル) で、API キーと料金の払い先が違う。</summary>
+public enum JevProvider
+{
+    /// <summary>OpenRouter の /api/alpha/decisions (OpenRouter のクレジットから払う)。</summary>
+    [Description("OpenRouter")] OpenRouter,
+    /// <summary>TypeSafe 公式の /v1/systemone (TypeSafe のアカウントで払う)。</summary>
+    [Description("TypeSafe 公式")] TypeSafe,
+}
+
 /// <summary>句読点の組み合わせ (Microsoft IME と同じ 4 通り)。, と . を打ったときに出す文字。</summary>
 public enum PunctuationStyle
 {
@@ -347,6 +356,18 @@ public sealed class Settings
      Description("zenz のモデルファイル (例: zenz-v3.1-small の ggml-model-Q5_K_M.gguf) の場所。「Zenzai を使う」が ON のときに使います。")]
     public string ZenzaiModelPath { get; set; } = "";
 
+    [Category("1. 全般"), DisplayName("Jev で変換候補を選ぶ (Windows・実験)"),
+     Description("Space で変換したとき、変換中の文の読みと各文節の候補を Jev (TypeSafe の決定モデル) に送り、文節ごとに一番自然な候補を選ばせます。打った文字が外部に送られます。下の「Jev: 接続先」と「Jev: API キー」を設定してください。間に合わないとき・通信できないときは、今までの変換のままです。")]
+    public bool UseJev { get; set; }
+
+    [Category("1. 全般"), DisplayName("Jev: 接続先"),
+     Description("Jev に問い合わせる先。OpenRouter (https://openrouter.ai の API キー、OpenRouter のクレジットから払う) か、TypeSafe 公式 (https://console.typesafe.ai の API キー) か。どちらも同じ Jev 1.14 です。")]
+    public JevProvider JevProvider { get; set; } = JevProvider.OpenRouter;
+
+    [Category("1. 全般"), DisplayName("Jev: API キー"),
+     Description("「Jev: 接続先」の API キー。config.json に暗号化せずに保存します (プロファイルの書き出しには入りません)。空なら環境変数 (OpenRouter は OPENROUTER_API_KEY、TypeSafe 公式は TYPESAFE_API_KEY) を使います。")]
+    public string JevApiKey { get; set; } = "";
+
     [Category("1. 全般"), DisplayName("英訳の候補"),
      Description("変換の候補の後ろに英訳も出します (複雑な → complex, complicated)。JMdict のよく使う語から。選んだ英訳は少しずつ前に出ます。")]
     public bool TranslationCandidates { get; set; } = true;
@@ -540,6 +561,8 @@ public sealed class Settings
         nameof(Mode), nameof(TsfIntroduced), nameof(TsfOffered),
         // 設定画面の見た目は、プロファイルを切り替えても変えない
         nameof(SettingsShowHelp), nameof(SettingsWheelChangesValue),
+        // Jev の API キーはプロファイルの書き出しに入れない (人に渡すファイルに入るため)。接続先はキーと組なので一緒に
+        nameof(JevProvider), nameof(JevApiKey),
     ];
 
     /// <summary>今の設定の値のうち、プロファイルに入れるもの。</summary>

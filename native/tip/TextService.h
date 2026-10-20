@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "CandidateWindow.h"
+#include "GlowWindow.h"
 #include "Globals.h"
 #include "Json.h"
 #include "Pipe.h"
@@ -108,6 +109,10 @@ private:
     bool WriteCommit(TfEditCookie ec, ITfContext* context, ITfRange* range, const std::wstring& text);
     void ApplyComposition(TfEditCookie ec, ITfContext* context, const JsonValue& view);
     void ShowCandidates(TfEditCookie ec, ITfContext* context, const JsonValue& view);
+    // Jev が変えた文節 (view の jevClauses) を光らせる。無い → ある に変わったときだけ始め、変換中の文字が変わったら止める
+    void ShowGlow(TfEditCookie ec, ITfContext* context, const JsonValue& view);
+    // 光るのを止めて、次に jevClauses が来たらまた光らせる
+    void HideGlow();
     void EndComposition(TfEditCookie ec);
     void SetAttribute(TfEditCookie ec, ITfContext* context, ITfRange* range, TfGuidAtom atom);
     // 未確定の内容を確定する (フォーカスが移った・英数にしたなど)。非同期の編集セッションで行う
@@ -209,6 +214,9 @@ private:
     bool consumed_ = true;
 
     std::unique_ptr<CandidateWindow> candidates_;
+    std::unique_ptr<GlowWindow> glow_;
+    bool lastJev_ = false;         // 前の表示に Jev が変えた文節があった (光らせるのは、無い → ある に変わったときだけ)
+    std::wstring glowText_;        // 光らせ始めたときの変換中の文字 (変わったら止める)
     LangBarButton* langBar_ = nullptr;
 };
 

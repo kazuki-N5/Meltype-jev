@@ -105,4 +105,22 @@ public sealed class HybridConverter(Func<ConversionEngine> engine, MozcConverter
         }
         return list;
     }
+
+    /// <summary>読みの候補のうち keep に合うものを、Candidates と同じ並びで count 個まで。Mozc の候補でそろえば OS の変換エンジンには聞かない。</summary>
+    public IReadOnlyList<string> Candidates(string reading, Func<string, bool> keep, int count)
+    {
+        var list = new List<string>();
+        if (UseMozc) Add(mozc!.Candidates(reading));
+        if (list.Count < count && engine() != ConversionEngine.Mozc && systemCandidates is not null) Add(systemCandidates(reading));
+        return list;
+
+        void Add(IEnumerable<string> source)
+        {
+            foreach (var candidate in source)
+            {
+                if (list.Count >= count) return;
+                if (keep(candidate) && !list.Contains(candidate)) list.Add(candidate);
+            }
+        }
+    }
 }

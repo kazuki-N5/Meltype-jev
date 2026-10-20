@@ -130,12 +130,16 @@ internal sealed class CompositionWindow : PopupForm
     }
     private CompositionView? _view;
     private readonly ColorTextRenderer _color = new();
+    private readonly JevGlow _glow;
+    /// <summary>光らせ始めたときの表示。文字・文節が変わったら光を消す。</summary>
+    private CompositionView? _glowView;
 
     public CompositionWindow()
     {
         BackColor = Background;
         Size = new Size(200, 40);
         _meaningTimer.Tick += (_, _) => ShowMeaning();
+        _glow = new JevGlow(this);
     }
 
     /// <summary>表示内容を更新する。anchor は表示位置 (キャレットの左下)。null なら今の位置のまま。</summary>
@@ -148,7 +152,9 @@ internal sealed class CompositionWindow : PopupForm
     /// <param name="rightEdge">右の端をここにそろえる (Windows の検索の画面の左に出すとき)。左の端は作業領域の中に収める。</param>
     public void ShowView(CompositionView view, Point? anchor, bool overlay = false, bool above = false, int belowY = 0, int? rightEdge = null)
     {
+        var previous = _view;
         _view = view;
+        UpdateGlow(previous, view);
         var size = Measure(view);
         if (anchor is not null) _above = above ? (anchor.Value.Y, belowY) : null;
         var location = anchor ?? Location;
@@ -163,6 +169,21 @@ internal sealed class CompositionWindow : PopupForm
         Invalidate();
         UpdateMeaning(view);
     }
+
+    /// <summary>
+    /// Jev が変えた文節が入った表示が来たら (前の表示には無かったときだけ) 光らせる。同じ表示が続いても光らせ直さない。
+    /// 文字や文節の区切りが変わったら、光をすぐに消す。
+    /// </summary>
+    private void UpdateGlow(CompositionView? previous, CompositionView view)
+    {
+        if (_glow.Running && _glowView is { } shown && (shown.Text != view.Text || !SameClauses(shown.Clauses, view.Clauses))) _glow.Stop();
+        if (view.JevClauses is not { Count: > 0 } || previous?.JevClauses is { Count: > 0 }) return;
+        _glowView = view;
+        _glow.Start();
+    }
+
+    private static bool SameClauses(IReadOnlyList<string>? a, IReadOnlyList<string>? b) =>
+        a is null || b is null ? a is null && b is null : a.SequenceEqual(b);
 
     /// <summary>入力位置の上に出しているときの、変換ボックスの下の端と、上に入らないときに出す位置 (入力位置の下)。</summary>
     private (int Bottom, int BelowY)? _above;
@@ -232,6 +253,7 @@ internal sealed class CompositionWindow : PopupForm
         _meaningTimer.Stop();
         _meaningKey = null;
         _meaningPopup?.Hide();
+        _glow.Stop();
     }
 
     /// <summary>候補の意味を出す小さな枠 (フォーカスを奪わない)。</summary>
@@ -306,7 +328,8 @@ internal sealed class CompositionWindow : PopupForm
                 var note = view.Notes?.ElementAtOrDefault(i) is { } n ? TextRenderer.MeasureText(g, n, _hintFont).Width + 12 : 0;
                 width = Math.Max(width, TextRenderer.MeasureText(g, $"9  {view.Candidates[i]}", _candidateFont).Width + 28 + note);
             }
-            height += Math.Min(view.Candidates.Count, PageSize) * (_candidateFont.Height + 4) + 6;
+            // Jev の 1 回目の Space は候補の一覧を出さない (候補が空)。空の一覧の分は取らない
+            if (view.Candidates.Count > 0) height += Math.Min(view.Candidates.Count, PageSize) * (_candidateFont.Height + 4) + 6;
             // 2 ページ以上あるときは、下に「3 / 27」を出す分
             if (view.Candidates.Count > PageSize) height += _hintFont.Height + 2;
         }
@@ -335,6 +358,8 @@ internal sealed class CompositionWindow : PopupForm
         {
             // 変換中: 文節ごとに下線を引き、選択中の文節は背景を付けて太線にする。
             const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+            var glowing = _glow.Running ? _glowView?.JevClauses : null;
+            List<RectangleF>? glowRects = null;
             var x = 10;
             for (var i = 0; i < clauses.Count; i++)
             {
@@ -350,8 +375,11 @@ internal sealed class CompositionWindow : PopupForm
                 {
                     g.DrawLine(underline, x + 1, y + _textFont.Height + 1, x + width - 2, y + _textFont.Height + 1);
                 }
+                if (glowing is not null && glowing.Contains(i)) (glowRects ??= new List<RectangleF>()).Add(new RectangleF(x - 1, y - 1, width + 2, _textFont.Height + 2));
                 x += width + 4;
             }
+            // Jev が変えた文節の光は、文字の上に重ねる (大きさは文字の高さに合わせて、DPI・倍率に追従させる)
+            if (glowRects is not null) _glow.Paint(g, glowRects, _textFont.Height / 23F);
             y += _textFont.Height + 8;
         }
         else
@@ -416,7 +444,7 @@ internal sealed class CompositionWindow : PopupForm
                 TextRenderer.DrawText(g, page, _hintFont, new Point(Width - pageWidth - 10, y + 1), _palette.Hint, TextFormatFlags.NoPrefix);
                 y += _hintFont.Height + 2;
             }
-            y += 6;
+            if (view.Candidates.Count > 0) y += 6;
         }
         else if (view.Predictions is { Count: > 0 } predictions)
         {
@@ -485,6 +513,7 @@ internal sealed class CompositionWindow : PopupForm
             _hintFont.Dispose();
             _color.Dispose();
             _meaningTimer.Dispose();
+            _glow.Dispose();
             _meaningPopup?.Dispose();
         }
         base.Dispose(disposing);
