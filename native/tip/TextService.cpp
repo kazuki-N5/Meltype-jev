@@ -6,6 +6,7 @@
 #include <InputScope.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cwctype>
 
@@ -305,7 +306,7 @@ STDMETHODIMP TextService::ActivateEx(ITfThreadMgr* threadMgr, TfClientId clientI
     open_ = !disabled_;
 
     candidates_ = std::make_unique<CandidateWindow>([this](int index, bool prediction) { SelectCandidate(index, prediction); });
-    glow_ = std::make_unique<GlowWindow>();
+    morph_ = std::make_unique<MorphWindow>();
 
     if (!disabled_) {
         langBar_ = new LangBarButton(this);
@@ -354,7 +355,7 @@ STDMETHODIMP TextService::Deactivate() {
     abandoned_.clear();
     pipe_.Close();
     candidates_.reset();
-    glow_.reset();
+    morph_.reset();
     UnadviseTextEditSink();
 
     if (langBar_ != nullptr) {
@@ -421,14 +422,14 @@ STDMETHODIMP TextService::OnSetFocus(ITfDocumentMgr* focus, ITfDocumentMgr*) {
     caretMoved_ = true;
     ForgetSecretField();
     if (candidates_) candidates_->Hide();
-    HideGlow();
+    HideJevMorph();
     AdviseTextEditSink(focus);
     return S_OK;
 }
 
 STDMETHODIMP TextService::OnSetFocus(BOOL foreground) {
     if (!foreground && candidates_) candidates_->Hide();
-    if (!foreground) HideGlow();
+    if (!foreground) HideJevMorph();
     // 別アプリの設定画面から戻ったとき、キー入力の前に最新設定を読み直す。
     if (foreground && !disabled_) Hello();
     // キーを受け取らなくなった (スレッドが前面でなくなった・ほかの IME に移った): 受け取ったキーを離したことは届かないかもしれないので忘れる
@@ -683,6 +684,7 @@ void TextService::Hello() {
     serverActive_ = Request("{\"op\":\"hello\",\"process\":" + JsonString(ProcessName()) + "}", reply) && reply[L"active"].Bool();
     directDetection_ = serverActive_ && reply[L"directDetection"].Bool();
     fullWidthSpace_ = serverActive_ && reply[L"fullWidthSpace"].Bool();
+    useJev_ = serverActive_ && reply[L"useJev"].Bool();
     directEnglishWord_ = false;
     // コードエディター・ターミナルのアプリなら、キャレットが動くたびに入力モードの表示を合わせる (QueryMode)
     codeApp_ = serverActive_ && reply[L"code"].Bool();
@@ -925,9 +927,13 @@ void TextService::HandleKey(ITfContext* context, UINT vk, wchar_t ch) {
         }
         request += "}";
         JsonValue reply;
+        // 最初の Space で、設定で Jev を使うとき: 応答を待つ間 (このスレッドは止まっていてタイマーが来ない)、Jev を待つ表示を動かす
+        bool thinking = vk == VK_SPACE && useJev_ && open_ && !lastConverting_ && BeginJevThinking(ec, context);
+        std::function<void()> waiting;
+        if (thinking) waiting = [this] { morph_->ThinkFrame(); };
         // Space は、設定で Jev (Meltype.exe がネットの先に変換候補を選ばせる) を使うと 1 秒まで待つことがあるので、長めに待つ
         // (ほかのキーは今までどおり 800ms。Meltype.exe が固まったときに、打つたびに長く止まらないように)
-        if (!Request(request, reply, vk == VK_SPACE ? 1300 : 800)) {
+        if (!Request(request, reply, vk == VK_SPACE ? 1300 : 800, false, waiting)) {
             // Meltype.exe が応答しない: 変換中の文字はそのまま確定する。打った文字はここで入れる
             // (送り直すと、その間に打った次のキーより後に届いて順番が入れ替わる)
             keyFailed_ = true;
@@ -935,7 +941,14 @@ void TextService::HandleKey(ITfContext* context, UINT vk, wchar_t ch) {
             // 次のキーで、すぐに問い合わせ直す (Meltype.exe の画面のスレッドが少しふさがっただけなら、次のキーから使える)
             lastHello_ = 0;
             if (candidates_) candidates_->Hide();
-            HideGlow();
+            // Jev を待つ表示を出していたら、答えが無かったことを赤くして知らせてから消す
+            if (thinking) {
+                morph_->EndThinking(true);
+                lastJev_ = false;
+                morphText_.clear();
+            } else {
+                HideJevMorph();
+            }
             EndComposition(ec);
             // Ctrl・Alt・Windows キーとの組み合わせは、文字を入れずにアプリに送り直す
             if (ch >= 0x20 && (mods & (2 | 4 | 8)) == 0) {
@@ -952,12 +965,15 @@ void TextService::HandleKey(ITfContext* context, UINT vk, wchar_t ch) {
         directDetection_ = serverActive_ && reply[L"directDetection"].Bool();
         directEnglishWord_ = directDetection_ && reply[L"directEnglishWord"].Bool();
         fullWidthSpace_ = serverActive_ && reply[L"fullWidthSpace"].Bool();
+        useJev_ = serverActive_ && reply[L"useJev"].Bool();
         switchToJapanese = reply[L"switchToJapanese"].Bool();
         consumed_ = reply[L"consumed"].Bool();
         ApplyMode(reply);
         // 入力の続きが無いので受け持たなかっただけ (つなぎ直した) かもしれない: 次のキーで、すぐに問い合わせ直す
         if (!serverActive_ && composition_ != nullptr) lastHello_ = 0;
         Apply(ec, context, reply);
+        // 応答に変換中の表示が無かった (確定した・受け持たなかった) など、Jev を待つ表示が残っていたら消していく
+        if (thinking) morph_->EndThinking();
         bool wasDirect = !open_ && !switchToJapanese;
         if (!consumed_ && wasDirect && ch >= L' ' && ch <= L'~' && vk != VK_SPACE &&
             (mods & (2 | 4 | 8)) == 0 && reply[L"commits"].array.empty() && reply[L"view"].IsNull()) {
@@ -1123,7 +1139,7 @@ void TextService::Reinject(UINT vk) {
     }
 }
 
-bool TextService::Request(const std::string& json, JsonValue& reply, DWORD timeoutMs, bool optional) {
+bool TextService::Request(const std::string& json, JsonValue& reply, DWORD timeoutMs, bool optional, const std::function<void()>& waiting) {
     if (deactivated_) return false;
     std::string response;
     // Meltype.exe 自身の中: どのスレッドからの要求かを付ける (画面のスレッドからなら、Meltype.exe はそのスレッドを待たずに処理する。
@@ -1133,7 +1149,7 @@ bool TextService::Request(const std::string& json, JsonValue& reply, DWORD timeo
         request.insert(request.size() - 1, ",\"tid\":" + std::to_string(GetCurrentThreadId()));
     }
     // 初めての変換は Mozc の起動などで時間がかかることがあるので、少し長めに待つ
-    if (!pipe_.Transact(request, response, timeoutMs, optional)) return false;
+    if (!pipe_.Transact(request, response, timeoutMs, optional, waiting)) return false;
     if (!ParseJson(response, reply)) {
         TipLog(L"応答を読めません");
         return false;
@@ -1204,7 +1220,7 @@ void TextService::Apply(TfEditCookie ec, ITfContext* context, const JsonValue& r
     if (!view.IsNull() && !view[L"text"].Str().empty()) {
         ApplyComposition(ec, context, view);
         ShowCandidates(ec, context, view);
-        ShowGlow(ec, context, view);
+        ShowJevMorph(ec, context, view);
     } else {
         if (composition_ != nullptr) {
             // 変換中の文字を消した (BackSpace で全部消した・Esc で取り消した)。
@@ -1217,7 +1233,7 @@ void TextService::Apply(TfEditCookie ec, ITfContext* context, const JsonValue& r
             EndComposition(ec);
         }
         if (candidates_) candidates_->Hide();
-        HideGlow();
+        HideJevMorph();
     }
 }
 
@@ -1410,7 +1426,7 @@ STDMETHODIMP TextService::OnCompositionTerminated(TfEditCookie ec, ITfCompositio
         compositionContext_ = nullptr;
     }
     if (candidates_) candidates_->Hide();
-    HideGlow();
+    HideJevMorph();
     staleCommitTries_ = 0;
     staleVk_ = 0;
     lastConverting_ = false;
@@ -1513,7 +1529,7 @@ void TextService::AbandonComposition() {
     staleCommitTries_ = 0;
     staleVk_ = 0;
     if (candidates_) candidates_->Hide();
-    HideGlow();
+    HideJevMorph();
     directEnglishWord_ = false;
     caretMoved_ = true;
     JsonValue reply;
@@ -1569,7 +1585,7 @@ void TextService::CommitInSession(TfEditCookie ec, ITfContext* context, bool kee
         EndComposition(ec);
     }
     if (candidates_) candidates_->Hide();
-    HideGlow();
+    HideJevMorph();
 }
 
 void TextService::SelectCandidate(int index, bool prediction) {
@@ -1666,52 +1682,126 @@ void TextService::ShowCandidates(TfEditCookie ec, ITfContext* context, const Jso
     candidates_->Show(data, anchor);
 }
 
-void TextService::ShowGlow(TfEditCookie ec, ITfContext* context, const JsonValue& view) {
-    if (!glow_) return;
+void TextService::ShowJevMorph(TfEditCookie ec, ITfContext* context, const JsonValue& view) {
+    if (!morph_) return;
     const std::wstring& text = view[L"text"].Str();
-    const auto& jev = view[L"jevClauses"].array;
-    bool start = !jev.empty() && !lastJev_;
-    lastJev_ = !jev.empty();
-    if (!start) {
-        // 同じ表示が続くときは光らせ直さない。変換中の文字が変わったら止める
-        if (glow_->Playing() && text != glowText_) glow_->Hide();
+    const auto& changes = view[L"jevChanges"].array;
+    bool start = !changes.empty() && !lastJev_;
+    lastJev_ = !changes.empty();
+    // Jev も同じ候補を選んだ: Jev を待つ表示を見せていたら、変換した文字をグラデーションからふつうの色に戻すところだけ見せる
+    bool settle = !start && morph_->ThinkingShown() && view[L"jev"].Str() == L"kept";
+    if (!start && !settle) {
+        // 答えが無かった (赤くしてから消していく)・聞かなかった (消していく): Jev を待つ表示を終わらせる
+        if (morph_->Thinking()) {
+            morph_->EndThinking(view[L"jev"].Str() == L"failed");
+            morphText_ = text;
+            return;
+        }
+        // 同じ表示が続くときは見せ直さない。変換中の文字が変わったら止める
+        if (morph_->Playing() && text != morphText_) morph_->Hide();
         return;
     }
-    glowText_ = text;
-    // Jev が変えた文節の画面上の位置 (文節の文字は、変換中の文字の中に順に並んでいる)
-    std::vector<RECT> rects;
+    morphText_ = text;
+    // Jev が変えた文節 (色を戻すだけなら全部の文節) の画面上の位置 (文節の文字は、変換中の文字の中に順に並んでいる)
+    std::vector<MorphClause> items;
     const auto& clauses = view[L"clauses"].array;
+    LONG total = 0;
+    for (const JsonValue& clause : clauses) total += static_cast<LONG>(clause.Str().size());
+    LONG lastEnd = 0;  // 最後の文節の終わり (変換中の文字の中の位置)
     Microsoft::WRL::ComPtr<ITfRange> range;
     Microsoft::WRL::ComPtr<ITfContextView> contextView;
-    if (composition_ != nullptr && SUCCEEDED(composition_->GetRange(&range)) && SUCCEEDED(context->GetActiveView(&contextView))) {
-        for (const JsonValue& item : jev) {
-            int index = item.Int();
-            if (index < 0 || index >= static_cast<int>(clauses.size())) continue;
-            LONG offset = 0;
-            for (int i = 0; i < index; i++) offset += static_cast<LONG>(clauses[i].Str().size());
-            Microsoft::WRL::ComPtr<ITfRange> clause;
-            if (FAILED(range->Clone(&clause))) continue;
-            LONG moved = 0;
-            clause->Collapse(ec, TF_ANCHOR_START);
-            clause->ShiftEnd(ec, offset + static_cast<LONG>(clauses[index].Str().size()), &moved, nullptr);
-            clause->ShiftStart(ec, offset, &moved, nullptr);
-            RECT rect = {};
-            BOOL clipped = FALSE;
-            if (SUCCEEDED(contextView->GetTextExt(ec, clause.Get(), &rect, &clipped)) && !IsRectEmpty(&rect)) rects.push_back(rect);
-        }
-    }
-    // 位置が分からないアプリでは光らせない
-    if (rects.empty()) {
-        glow_->Hide();
+    if (composition_ == nullptr || FAILED(composition_->GetRange(&range)) || FAILED(context->GetActiveView(&contextView))) {
+        morph_->Hide();
         return;
     }
-    glow_->Play(rects);
+    // 変換中の文字の at から length 文字の、画面上の四角形
+    auto extent = [&](LONG at, LONG length, RECT& rect) {
+        Microsoft::WRL::ComPtr<ITfRange> part;
+        if (FAILED(range->Clone(&part))) return false;
+        LONG moved = 0;
+        part->Collapse(ec, TF_ANCHOR_START);
+        part->ShiftEnd(ec, at + length, &moved, nullptr);
+        part->ShiftStart(ec, at, &moved, nullptr);
+        BOOL clipped = FALSE;
+        rect = {};
+        return SUCCEEDED(contextView->GetTextExt(ec, part.Get(), &rect, &clipped)) && !IsRectEmpty(&rect);
+    };
+    // 文節 index を、前の候補 from から入れ替える
+    auto add = [&](int index, const std::wstring& from) {
+        if (index < 0 || index >= static_cast<int>(clauses.size())) return;
+        LONG offset = 0;
+        for (int i = 0; i < index; i++) offset += static_cast<LONG>(clauses[i].Str().size());
+        LONG length = static_cast<LONG>(clauses[index].Str().size());
+        MorphClause item = {{}, from, clauses[index].Str()};
+        if (!extent(offset, length, item.rect)) return;
+        items.push_back(std::move(item));
+        if (offset + length > lastEnd) lastEnd = offset + length;
+    };
+    if (settle) {
+        for (size_t i = 0; i < clauses.size(); i++) add(static_cast<int>(i), clauses[i].Str());
+        // 位置が分からないアプリでは、Jev を待つ表示を消していく
+        if (items.empty()) {
+            morph_->EndThinking();
+            return;
+        }
+        morph_->Play(items, -1, true);
+        return;
+    }
+    for (const JsonValue& change : changes) add(change[L"clause"].Int(), change[L"from"].Str());
+    // 位置が分からないアプリでは見せない
+    if (items.empty()) {
+        morph_->Hide();
+        return;
+    }
+    // 幅が変わる分だけ後ろの文字を寄せるのは、文節も、最後の文節に続く変換中の文字も、すべて同じ行にあるときだけ
+    auto sameLine = [&](const RECT& rect) {
+        return std::abs(rect.top - items.front().rect.top) <= 1 && std::abs(rect.bottom - items.front().rect.bottom) <= 1;
+    };
+    LONG tailRight = -1;
+    if (std::all_of(items.begin(), items.end(), [&](const MorphClause& item) { return sameLine(item.rect); })) {
+        RECT tail = {};
+        if (lastEnd >= total) {
+            tailRight = items.back().rect.right;
+        } else if (extent(lastEnd, total - lastEnd, tail) && sameLine(tail)) {
+            tailRight = tail.right;
+        }
+    }
+    morph_->Play(items, tailRight);
 }
 
-void TextService::HideGlow() {
-    if (glow_) glow_->Hide();
+void TextService::HideJevMorph() {
+    if (morph_) morph_->Hide();
     lastJev_ = false;
-    glowText_.clear();
+    morphText_.clear();
+}
+
+bool TextService::BeginJevThinking(TfEditCookie ec, ITfContext* context) {
+    if (!morph_ || composition_ == nullptr) return false;
+    Microsoft::WRL::ComPtr<ITfRange> range;
+    Microsoft::WRL::ComPtr<ITfContextView> contextView;
+    if (FAILED(composition_->GetRange(&range)) || FAILED(context->GetActiveView(&contextView))) return false;
+    // 変換中の文字の最初と最後の 1 文字の四角形 (同じ行になければ出さない: 1 行の四角形にできない)
+    auto edge = [&](bool last, RECT& rect) {
+        Microsoft::WRL::ComPtr<ITfRange> part;
+        if (FAILED(range->Clone(&part))) return false;
+        LONG moved = 0;
+        if (last) {
+            part->Collapse(ec, TF_ANCHOR_END);
+            part->ShiftStart(ec, -1, &moved, nullptr);
+        } else {
+            part->Collapse(ec, TF_ANCHOR_START);
+            part->ShiftEnd(ec, 1, &moved, nullptr);
+        }
+        BOOL clipped = FALSE;
+        rect = {};
+        return moved != 0 && SUCCEEDED(contextView->GetTextExt(ec, part.Get(), &rect, &clipped)) && !IsRectEmpty(&rect);
+    };
+    RECT first = {}, last = {};
+    if (!edge(false, first) || !edge(true, last)) return false;
+    if (std::abs(first.top - last.top) > 1 || std::abs(first.bottom - last.bottom) > 1 || last.right <= first.left) return false;
+    RECT text = {first.left, (std::min)(first.top, last.top), last.right, (std::max)(first.bottom, last.bottom)};
+    morph_->BeginThinking(text);
+    return morph_->Thinking();
 }
 
 // ---- 下線の種類 ----

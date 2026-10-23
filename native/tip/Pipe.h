@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 
 #include "Globals.h"
@@ -20,15 +21,17 @@ public:
 
     // 要求を送って応答を待つ。つながらない・時間切れなら false (次の呼び出しでつなぎ直す)。
     // optional: 失敗しても入力に困らない問い合わせ。時間切れでも、しばらくつながないようにはしない
-    bool Transact(const std::string& request, std::string& response, DWORD timeoutMs, bool optional = false);
+    // waiting: 応答を待つ間に kWaitSliceMs ごとに呼ぶ (Jev を待つ間の表示を動かす。アプリの画面のスレッドは、待つ間ほかに何もできない)
+    bool Transact(const std::string& request, std::string& response, DWORD timeoutMs, bool optional = false, const std::function<void()>& waiting = {});
     void Close();
 
 private:
     bool Connect();
-    bool Wait(OVERLAPPED& overlapped, DWORD timeoutMs, DWORD& transferred);
+    bool Wait(OVERLAPPED& overlapped, DWORD timeoutMs, DWORD& transferred, const std::function<void()>& waiting);
     void TimedOut(bool optional);
 
     static constexpr size_t kMaxResponse = 1024 * 1024;
+    static constexpr DWORD kWaitSliceMs = 16;
     HANDLE pipe_ = INVALID_HANDLE_VALUE;
     HANDLE event_ = nullptr;
     // つながらなかったとき、すぐにまた試さない (Meltype.exe が動いていないときに毎回待たないように)

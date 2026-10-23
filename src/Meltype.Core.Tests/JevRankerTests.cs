@@ -95,12 +95,14 @@ internal static class JevRankerTests
         var root = body.RootElement;
         Assert.Equal("https://openrouter.ai/api/alpha/decisions", request.Uri?.ToString(), "既定は OpenRouter");
         Assert.Equal("typesafe/jev-1.14", root.GetProperty("model").GetString());
-        Assert.Equal("日本語入力で変換中の文: わたしはきょうさっかーをします", root.GetProperty("state").GetString(), "文は読み");
+        var state = root.GetProperty("state").GetString()!;
+        Assert.True(state.EndsWith(": " + SoccerReading), "文は読み: " + state);
         var questions = root.GetProperty("questions");
         Assert.Equal("c0,c1,c2", string.Join(",", questions.EnumerateObject().Select(q => q.Name)), "文節ごとに c<番号>");
         var c1 = questions.GetProperty("c1");
         Assert.Equal("choice", c1.GetProperty("type").GetString());
-        Assert.Equal("変換中の文の「きょうさっかーを」の部分を、自然で正しい日本語として書いた文はどれか", c1.GetProperty("instructions").GetString());
+        var instructions = c1.GetProperty("instructions").GetString()!;
+        Assert.True(instructions.Contains("「きょうさっかーを」"), "聞く文節の読みを示す: " + instructions);
         var criteria = c1.GetProperty("criteria").EnumerateObject().ToDictionary(p => p.Name, p => p.Value.GetString());
         Assert.Equal(4, criteria.Count, "選択肢ごとに 1 つ");
         Assert.Equal("わたしは今日サッカーをします", criteria["今日サッカーを"], "候補 → その候補を入れた文");
@@ -118,7 +120,8 @@ internal static class JevRankerTests
         Assert.Equal("Bearer ts-key", request.Authorization);
         using var body = JsonDocument.Parse(request.Body!);
         Assert.Equal("jev-1.14.0", body.RootElement.GetProperty("model").GetString(), "TypeSafe 公式のモデル名 (OpenRouter の typesafe/jev-1.14 ではない)");
-        Assert.Equal("日本語入力で変換中の文: わたしはきょうさっかーをします", body.RootElement.GetProperty("state").GetString());
+        var state = body.RootElement.GetProperty("state").GetString()!;
+        Assert.True(state.EndsWith(": " + SoccerReading), "文は読み: " + state);
     }
 
     [Test]
@@ -167,73 +170,37 @@ internal static class JevRankerTests
     }
 
     [Test]
-    public static void Choose_TwoTimeoutsInARow_PauseForFiveSeconds()
+    public static void Choose_AfterTimeouts_AsksAgainRightAway()
     {
-        long clock = 0;
         var jev = new FakeJev { DelayMs = 500 };
-        using var ranker = new JevRanker("key", jev, () => clock);
+        using var ranker = new JevRanker("key", jev);
         var quick = TimeSpan.FromMilliseconds(10);
         ranker.Choose("一", [Question(0, "いち", "", "", "一", "いち")], quick);
         ranker.Choose("二", [Question(0, "に", "", "", "二", "に")], quick);
-        Assert.Equal(2, jev.Requests.Count);
-        jev.DelayMs = 0;
-        Assert.True(ranker.Choose("三", [Question(0, "さん", "", "", "三", "さん")], Wait) is null, "休んでいる間は聞かない");
-        clock += 4999;
-        ranker.Choose("三", [Question(0, "さん", "", "", "三", "さん")], Wait);
-        Assert.Equal(2, jev.Requests.Count, "5 秒は送らない");
-        clock += 2;
-        ranker.Choose("三", [Question(0, "さん", "", "", "三", "さん")], Wait);
-        Assert.Equal(3, jev.Requests.Count, "5 秒たったら送る");
+        ranker.Choose("三", [Question(0, "さん", "", "", "三", "さん")], quick);
+        Assert.Equal(3, jev.Requests.Count, "時間切れが続いても休まずに送る");
         Assert.True(ranker.IsAvailable, "時間切れでは止めない");
     }
 
     [Test]
-    public static void Choose_BadKeyOrNoCredit_StopsUsingJev()
+    public static void Choose_AfterAFailedReply_SendsAgainOnTheNextPress()
     {
-        foreach (var status in new[] { HttpStatusCode.Unauthorized, HttpStatusCode.PaymentRequired })
+        var failures = new (HttpStatusCode Status, string Body)[]
         {
-            var jev = new FakeJev { Reply = _ => (status, "{\"error\":{}}") };
+            (HttpStatusCode.Unauthorized, "{\"error\":{}}"), (HttpStatusCode.Forbidden, "{\"error\":{}}"),
+            (HttpStatusCode.PaymentRequired, "{\"error\":{}}"), (HttpStatusCode.TooManyRequests, "{}"), ((HttpStatusCode)529, "{}"),
+            (HttpStatusCode.InternalServerError, ""), (HttpStatusCode.OK, "<html>"), (HttpStatusCode.OK, "{\"usage\":{}}"),
+        };
+        foreach (var (status, text) in failures)
+        {
+            var jev = new FakeJev { Reply = _ => (status, text) };
             using var ranker = new JevRanker("key", jev);
-            Assert.True(ranker.Choose(SoccerReading, Soccer(), Wait) is null, $"{(int)status}: 答えなし");
-            Assert.True(!ranker.IsAvailable, $"{(int)status}: 使えなくなる");
-            ranker.Choose("べつのぶん", [Question(0, "べつ", "", "のぶん", "別", "べつ")], Wait);
-            Assert.Equal(1, jev.Requests.Count, $"{(int)status}: 次から送らない");
+            for (var i = 0; i < 4; i++) Assert.True(ranker.Choose(SoccerReading, Soccer(), Wait) is null, $"{(int)status} {text}: 答えなし");
+            Assert.Equal(4, jev.Requests.Count, $"{(int)status} {text}: 同じ文でも押すたびに送り直す");
+            Assert.True(ranker.IsAvailable, $"{(int)status} {text}: 止めない");
+            jev.Reply = _ => (HttpStatusCode.OK, Answers(("c1", "今日サッカーを")));
+            Assert.Equal("今日サッカーを", ranker.Choose(SoccerReading, Soccer(), Wait)?[1], $"{(int)status} {text}: 直ったらすぐ答えを使う");
         }
-    }
-
-    [Test]
-    public static void Choose_TooManyRequests_PausesForAMinute()
-    {
-        long clock = 0;
-        var jev = new FakeJev { Reply = _ => (HttpStatusCode.TooManyRequests, "{}") };
-        using var ranker = new JevRanker("key", jev, () => clock);
-        ranker.Choose(SoccerReading, Soccer(), Wait);
-        jev.Reply = _ => (HttpStatusCode.OK, Answers(("c1", "今日サッカーを")));
-        clock += 59_999;
-        Assert.True(ranker.Choose(SoccerReading, Soccer(), Wait) is null, "混雑のあとは休む");
-        Assert.Equal(1, jev.Requests.Count, "60 秒は送らない");
-        clock += 2;
-        Assert.Equal("今日サッカーを", ranker.Choose(SoccerReading, Soccer(), Wait)?[1], "60 秒たったら送る");
-        Assert.True(ranker.IsAvailable, "混雑では止めない");
-    }
-
-    [Test]
-    public static void Choose_ThreeUnreadableReplies_StopUsingJev()
-    {
-        var jev = new FakeJev { Reply = _ => (HttpStatusCode.OK, "<html>") };
-        using var ranker = new JevRanker("key", jev);
-        string[] words = ["一", "二", "三"];
-        for (var i = 0; i < words.Length; i++)
-        {
-            Assert.True(ranker.IsAvailable, $"{i} 回目まではまだ使う");
-            Assert.True(ranker.Choose(words[i], [Question(0, "よみ" + i, "", "", words[i], "よみ" + i)], Wait) is null, "読めない応答は答えなし");
-        }
-        Assert.True(!ranker.IsAvailable, "3 回続けて読めなければ止める");
-        jev.Reply = _ => (HttpStatusCode.OK, "{\"usage\":{}}");
-        var other = new JevRanker("key", jev);
-        for (var i = 0; i < 3; i++) other.Choose(words[i], [Question(0, "よみ" + i, "", "", words[i], "よみ" + i)], Wait);
-        Assert.True(!other.IsAvailable, "answers が無い応答も読めない応答");
-        other.Dispose();
     }
 
     [Test]

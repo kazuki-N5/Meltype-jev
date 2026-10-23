@@ -518,7 +518,7 @@ internal sealed class TipServer : IDisposable
                 if (!greeting) return Inactive;
                 // コードエディター・ターミナルのアプリか (DLL は、キャレットが動くたびに入力モードの表示を問い合わせる)
                 var codeApp = _settings().ProfileFor(process + ".exe") == AppProfile.Code;
-                return $"{{\"active\":true,\"code\":{(codeApp ? "true" : "false")},\"directDetection\":{(DirectDetectionFor(process) ? "true" : "false")},{FullWidthSpaceJson()}\"consumed\":false,\"commits\":[],\"view\":null}}";
+                return $"{{\"active\":true,\"code\":{(codeApp ? "true" : "false")},\"directDetection\":{(DirectDetectionFor(process) ? "true" : "false")},{FullWidthSpaceJson()}{UseJevJson()}\"consumed\":false,\"commits\":[],\"view\":null}}";
             }
             case "close":
                 if (sessions.Remove(sid, out var closing) && closing.IsComposing) closing.CommitPending();
@@ -614,13 +614,16 @@ internal sealed class TipServer : IDisposable
     /// </summary>
     private string FullWidthSpaceJson() => $"\"fullWidthSpace\":{(_settings().FullWidthSpaceByDefault ? "true" : "false")},";
 
+    /// <summary>設定「Jev で変換候補を選ぶ」。DLL は、これが ON のときだけ、最初の Space の応答を待つ間に Jev を待つ表示を出す。</summary>
+    private string UseJevJson() => $"\"useJev\":{(_settings().UseJev ? "true" : "false")},";
+
     private string Reply(bool active, SessionResult result, bool code, bool english, bool? directDetection,
         bool switchedToJapanese = false, bool? directEnglishWord = null)
     {
         var json = result.ToJson();
         var detection = directDetection is { } enabled ? $"\"directDetection\":{(enabled ? "true" : "false")}," : "";
         var englishWord = directEnglishWord is { } isEnglishWord ? $"\"directEnglishWord\":{(isEnglishWord ? "true" : "false")}," : "";
-        return $"{{\"active\":{(active ? "true" : "false")},\"code\":{(code ? "true" : "false")},\"english\":{(english ? "true" : "false")},{detection}{englishWord}{FullWidthSpaceJson()}\"switchToJapanese\":{(switchedToJapanese ? "true" : "false")},{json[1..]}";
+        return $"{{\"active\":{(active ? "true" : "false")},\"code\":{(code ? "true" : "false")},\"english\":{(english ? "true" : "false")},{detection}{englishWord}{FullWidthSpaceJson()}{UseJevJson()}\"switchToJapanese\":{(switchedToJapanese ? "true" : "false")},{json[1..]}";
     }
 
     /// <summary>

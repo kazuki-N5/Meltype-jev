@@ -32,10 +32,29 @@ public sealed record CompositionView(
     /// </summary>
     string? Committed = null,
     /// <summary>
-    /// Jev が候補を変えた文節の番号 (Clauses の位置)。Space の 1 回目で変換したときの表示から、次のキーまでだけ入る (それ以外は null)。
-    /// 変換ボックス・Meltype IME は、これが入った表示が来たときに 1 回だけ、その文節を光らせる。
+    /// Jev が候補を変えた文節 (Clauses の位置と、変える前の候補)。Space の 1 回目で変換したときの表示から、次のキーまでだけ入る (それ以外は null)。
+    /// 変換ボックス・Meltype IME は、これが入った表示が来たときに 1 回だけ、その文節を変える前の候補から今の候補へ溶けるように入れ替えて見せる。
     /// </summary>
-    IReadOnlyList<int>? JevClauses = null);
+    IReadOnlyList<JevChange>? JevChanges = null,
+    /// <summary>
+    /// Space の 1 回目で Jev に聞いたときの結果 (聞かなかったとき・それ以外の表示は null)。Meltype IME は、Jev を待つ間に出していた表示の
+    /// 終わらせ方をこれで決める (Changed は JevChanges の入れ替え、Kept は色を戻すだけ、Failed は文字全体を少し赤くしてから消していく)。
+    /// </summary>
+    JevResult? Jev = null);
+
+/// <summary>Jev が候補を変えた文節。Clause は CompositionView.Clauses の位置、From は Jev が変える前の候補 (変換エンジンの 1 番目)。</summary>
+public sealed record JevChange(int Clause, string From);
+
+/// <summary>Space の 1 回目で Jev に聞いた結果。</summary>
+public enum JevResult
+{
+    /// <summary>Jev が選んだ候補で、1 つ以上の文節が変わった。</summary>
+    Changed,
+    /// <summary>Jev は答えたが、どの文節も変わらなかった (Jev も同じ候補を選んだ・前に選び直した候補が優先された)。</summary>
+    Kept,
+    /// <summary>答えが無かった (時間切れ・混雑・通信エラーなど)。今までどおりの変換。</summary>
+    Failed,
+}
 
 /// <summary>CompositionController が外界とやり取りする口。テストでは偽物に差し替える。</summary>
 public interface ICompositionHost
@@ -628,7 +647,7 @@ public sealed class CompositionController
         }
         // 押したままの Shift のリピートは数えない。最初の押下はアプリに届いているので、離したことも伝える (issue #617)。
         if (!IsShift(vk) || !_host.IsShiftDown()) _capturedDown.Add(vk);
-        // Space の 1 回目の Jev の表示 (候補の一覧を出さない・光らせる) は、次のキーで終わる
+        // Space の 1 回目の Jev の表示 (候補の一覧を出さない・変えた文節を入れ替えて見せる) は、次のキーで終わる
         if (!VirtualKeys.IsModifier(vk)) EndJevView();
 
         if (_heldLetters.Length > 0)
@@ -1639,7 +1658,8 @@ public sealed class CompositionController
         }
         // 設定で Jev を使うときは、Space の 1 回目は変換だけを見せ、候補の一覧は 2 回目の Space / ↓ から出す
         var jevOn = _spaceStartedConversion && _options.Jev() is { IsAvailable: true };
-        var jevPicks = jevOn ? ApplyJev(clauses, started) : null;
+        var jevAsked = false;
+        var jevPicks = jevOn ? ApplyJev(clauses, started, out jevAsked) : null;
         if (clauses.Count == 0) return;
         // 変換したあとに続けて打っていたら、前に選んでいた候補を同じ読みの文節で使う
         foreach (var clause in clauses)
@@ -1650,19 +1670,23 @@ public sealed class CompositionController
         _selectedClause = 0;
         _converting = true;
         _jevView = jevOn;
-        // 前に選び直した候補 (_keptChoices) が優先されて Jev の答えでなくなった文節は光らせない
-        _jevClauses = jevPicks?.Where(p => clauses[p.Key].Text == p.Value).Select(p => p.Key).Order().ToList() ?? [];
+        // 前に選び直した候補 (_keptChoices) が優先されて Jev の答えでなくなった文節は入れ替えて見せない
+        _jevChanges = jevPicks?.Where(p => clauses[p.Key].Text == p.Value.To).OrderBy(p => p.Key).Select(p => new JevChange(p.Key, p.Value.From)).ToList() ?? [];
+        _jevResult = !jevAsked ? null : jevPicks is null ? JevResult.Failed : _jevChanges.Count > 0 ? JevResult.Changed : JevResult.Kept;
     }
 
     // Space の 1 回目で Jev を使って変換した直後の表示か (次のキーまで)。この間は候補の一覧を出さない
     private bool _jevView;
-    // そのとき Jev が候補を変えた文節の番号 (変換ボックスで光らせる)
-    private List<int> _jevClauses = [];
+    // そのとき Jev が候補を変えた文節 (変換ボックス・Meltype IME で、変える前の候補から入れ替えて見せる)
+    private List<JevChange> _jevChanges = [];
+    // そのとき Jev に聞いた結果 (聞かなかったら null)
+    private JevResult? _jevResult;
 
     private void EndJevView()
     {
         _jevView = false;
-        _jevClauses = [];
+        _jevChanges = [];
+        _jevResult = null;
     }
 
     /// <summary>選択肢の数の上限 (今の 1 番目を含む)。</summary>
@@ -1682,10 +1706,12 @@ public sealed class CompositionController
     /// Space で変換を始めたとき、変換中の文の読みと英語以外の全部の文節の候補を Jev に 1 回で聞き、各文節を Jev が選んだ候補にする。
     /// 今の変換 (Mozc などの 1 番目) は Jev に見せない: 文や前後の文節に今の変換を入れると、Jev はそれを正しいものとして選びやすく、
     /// 間違った文節に引っ張られる (公開しても遅い → 後悔しても を選ばない)。そのため、選択肢の文も聞く文節だけを候補にし、ほかは読みのままにする。
-    /// 間に合わない・使えないときは何もしない (今までどおりの変換)。変えた文節の番号と候補を返す (変えなければ null)。
+    /// 間に合わない・使えないときは何もしない (今までどおりの変換)。変えた文節の番号と、変える前と後の候補を返す (答えが無ければ null)。
+    /// asked は Jev に問い合わせたか (聞く文節が無い・残り時間が足りないときは聞かない)。
     /// </summary>
-    private Dictionary<int, string>? ApplyJev(List<Clause> clauses, long started)
+    private Dictionary<int, (string From, string To)>? ApplyJev(List<Clause> clauses, long started, out bool asked)
     {
+        asked = false;
         if (_options.Jev() is not { IsAvailable: true } jev) return null;
         var questions = new List<JevQuestion>();
         for (var i = 0; i < clauses.Count; i++)
@@ -1702,13 +1728,15 @@ public sealed class CompositionController
         var remaining = JevDeadlineMs - (Environment.TickCount64 - started);
         if (remaining < JevMinimumMs) return null;
         var reading = string.Concat(clauses.Select(c => c.Reading));
+        asked = true;
         if (jev.Choose(reading, questions, TimeSpan.FromMilliseconds(remaining)) is not { } picks) return null;
-        var changed = new Dictionary<int, string>();
+        var changed = new Dictionary<int, (string From, string To)>();
         foreach (var (index, text) in picks)
         {
-            if (clauses[index].Text == text) continue;
+            var from = clauses[index].Text;
+            if (from == text) continue;
             Prefer(clauses[index], text);
-            changed[index] = text;
+            changed[index] = (from, text);
         }
         return changed;
     }
@@ -3030,7 +3058,7 @@ public sealed class CompositionController
             {
                 // Jev を使った Space の 1 回目: 変換だけを見せる (候補の一覧・打ったキーの欄も出さない。一覧は次の Space / ↓ で取りに行く)
                 _host.Show(new CompositionView(text, [], -1, true, hint, _clauses.Select(c => c.Text).ToList(), _selectedClause,
-                    Suggestion: MisspellingSuggestion(), Committed: text, JevClauses: _jevClauses.Count > 0 ? _jevClauses : null));
+                    Suggestion: MisspellingSuggestion(), Committed: text, JevChanges: _jevChanges.Count > 0 ? _jevChanges : null, Jev: _jevResult));
                 return;
             }
             // 選んでいる文節は、最初から候補の一覧をすべて出す (Space を 1 回押しただけでは一部しか出ず、選び間違えやすかった)。

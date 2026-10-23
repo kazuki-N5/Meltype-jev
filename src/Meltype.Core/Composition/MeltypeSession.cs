@@ -85,17 +85,21 @@ public sealed record SessionResult(bool Consumed, IReadOnlyList<TextEdit> Commit
         builder.Append(",\"typed\":");
         if (view.Typed is { } typed) AppendString(builder, typed);
         else builder.Append("null");
-        // Jev が候補を変えた文節の番号 (Space の 1 回目の表示だけ。無ければ入れない)
-        if (view.JevClauses is { } jevClauses)
+        // Jev が候補を変えた文節の番号と、変える前の候補 (Space の 1 回目の表示だけ。無ければ入れない)
+        if (view.JevChanges is { } jevChanges)
         {
-            builder.Append(",\"jevClauses\":[");
-            for (var i = 0; i < jevClauses.Count; i++)
+            builder.Append(",\"jevChanges\":[");
+            for (var i = 0; i < jevChanges.Count; i++)
             {
                 if (i > 0) builder.Append(',');
-                builder.Append(jevClauses[i]);
+                builder.Append("{\"clause\":").Append(jevChanges[i].Clause).Append(",\"from\":");
+                AppendString(builder, jevChanges[i].From);
+                builder.Append('}');
             }
             builder.Append(']');
         }
+        // Space の 1 回目で Jev に聞いた結果 (聞かなかったら入れない)
+        if (view.Jev is { } jev) builder.Append(",\"jev\":\"").Append(jev switch { JevResult.Changed => "changed", JevResult.Kept => "kept", _ => "failed" }).Append('"');
         builder.Append("}}");
         return builder.ToString();
     }

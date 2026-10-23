@@ -24,7 +24,7 @@ function Get-Sha256([string]$path) {
     finally { $sha.Dispose() }
 }
 
-$sources = 'Dll.cpp', 'TextService.cpp', 'CandidateWindow.cpp', 'GlowWindow.cpp', 'DisplayAttributes.cpp', 'LangBar.cpp', 'Pipe.cpp', 'Json.cpp'
+$sources = 'Dll.cpp', 'TextService.cpp', 'CandidateWindow.cpp', 'MorphWindow.cpp', 'DisplayAttributes.cpp', 'LangBar.cpp', 'Pipe.cpp', 'Json.cpp'
 # /Brepro: 同じソースからは同じ DLL にする (日時を埋め込まない)。入れ直したときに、変わっていない DLL を登録し直さない (UAC を出さない) ため
 $optimize = if ($Configuration -eq 'Release') { '/O2 /MT /DNDEBUG' } else { '/Od /MTd /Zi' }
 $libs = 'ole32.lib oleaut32.lib uuid.lib user32.lib gdi32.lib advapi32.lib d2d1.lib dwrite.lib dwmapi.lib'

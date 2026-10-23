@@ -4644,7 +4644,8 @@ internal static class CompositionTests
         Assert.Equal(5, c1.Count, "今の 1 番目と、↓ の一覧で条件に合う 4 つ: " + string.Join(",", c1));
         Assert.True(c1.Contains("共サッカーを") && c1.Contains("今日サッカーを") && c1.Contains("きょうさっかーを"), string.Join(",", c1));
         // 今の変換 (共サッカーを) は Jev に見せない: 文は読み、選択肢の文も聞く文節だけを候補にして、ほかの文節は読みのまま
-        Assert.Equal("日本語入力で変換中の文: わたしはきょうさっかーをします", body.RootElement.GetProperty("state").GetString());
+        var state = body.RootElement.GetProperty("state").GetString()!;
+        Assert.True(state.EndsWith(": わたしはきょうさっかーをします"), "文は読み: " + state);
         Assert.Equal("わたしは今日サッカーをします", questions.GetProperty("c1").GetProperty("criteria").GetProperty("今日サッカーを").GetString());
         Assert.Equal("私はきょうさっかーをします", questions.GetProperty("c0").GetProperty("criteria").GetProperty("私は").GetString());
 
@@ -4667,26 +4668,76 @@ internal static class CompositionTests
         var first = k.Host.View!;
         Assert.True(first.Converting && first.Candidates.Count == 0, "Space の 1 回目は候補の一覧を出さない: " + string.Join(",", first.Candidates));
         Assert.True(first.Typed is null, "打ったキーの欄も出さない (Meltype IME はこれだけでも一覧の窓を出す)");
-        Assert.Equal("1", string.Join(",", first.JevClauses ?? []), "Jev が変えた文節 (今日サッカーを) だけ光らせる");
-        Assert.True(new SessionResult(true, [], first).ToJson().Contains("\"jevClauses\":[1]"), "Meltype IME にも渡す");
+        Assert.Equal("1:共サッカーを", string.Join(",", (first.JevChanges ?? []).Select(c => $"{c.Clause}:{c.From}")),
+            "Jev が変えた文節 (今日サッカーを) と、変える前の候補 (共サッカーを) だけを入れ替えて見せる");
+        Assert.True(new SessionResult(true, [], first).ToJson().Contains("\"jevChanges\":[{\"clause\":1,\"from\":\"共サッカーを\"}]"), "Meltype IME にも渡す");
 
-        // 2 回目の Space で、今の文節の一覧を出して次の候補へ (光らせるのは 1 回だけ)
+        // 2 回目の Space で、今の文節の一覧を出して次の候補へ (入れ替えて見せるのは 1 回だけ)
         k.Type(" ");
         var second = k.Host.View!;
         Assert.True(second.Candidates.Count > 1, "2 回目の Space で一覧を出す");
         Assert.Equal("わたしは", second.Clauses![0], "次の候補");
-        Assert.True(second.JevClauses is null, "次のキーで光らせるのをやめる");
-        Assert.True(!new SessionResult(true, [], second).ToJson().Contains("jevClauses"), "無いときは JSON に入れない");
+        Assert.True(second.JevChanges is null, "次のキーで入れ替えて見せるのをやめる");
+        Assert.True(!new SessionResult(true, [], second).ToJson().Contains("jevChanges"), "無いときは JSON に入れない");
 
         // Jev が答えなくても、Jev を使う設定なら 1 回目は一覧を出さない。Jev を使わなければ今までどおり 1 回目から出す
         var failing = new JevRankerTests.FakeJev { Reply = _ => (System.Net.HttpStatusCode.InternalServerError, "") };
         using var silent = new JevRanker("key", failing);
         var s = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: silent);
         s.Type("watashihakyousakka-woshimasu ");
-        Assert.True(s.Host.View!.Candidates.Count == 0 && s.Host.View.JevClauses is null, "答えが無ければ光らせない");
+        Assert.True(s.Host.View!.Candidates.Count == 0 && s.Host.View.JevChanges is null, "答えが無ければ入れ替えて見せない");
         var off = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates);
         off.Type("watashihakyousakka-woshimasu ");
         Assert.True(off.Host.View!.Candidates.Count > 1, "Jev を使わなければ 1 回目から一覧を出す");
+    }
+
+    [Test]
+    public static void Jev_FirstSpace_TellsWhetherJevChangedKeptOrFailed()
+    {
+        // Meltype IME は、Jev を待つ間に出していた表示を、これで終わらせる (入れ替える・色を戻すだけ・消していく)
+        static CompositionView FirstSpace(JevRanker? jev)
+        {
+            var k = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: jev);
+            k.Type("watashihakyousakka-woshimasu ");
+            return k.Host.View!;
+        }
+        string Json(CompositionView view) => new SessionResult(true, [], view).ToJson();
+
+        using (var changed = new JevRanker("key", SoccerJev()))
+        {
+            var view = FirstSpace(changed);
+            Assert.Equal(JevResult.Changed, view.Jev, "Jev が候補を変えた");
+            Assert.True(Json(view).Contains("\"jev\":\"changed\""), "Meltype IME に渡す: " + Json(view));
+        }
+        var same = new JevRankerTests.FakeJev { Reply = _ => (System.Net.HttpStatusCode.OK, JevRankerTests.Answers(("c0", "私は"), ("c1", "共サッカーを"))) };
+        using (var kept = new JevRanker("key", same))
+        {
+            var view = FirstSpace(kept);
+            Assert.Equal(JevResult.Kept, view.Jev, "Jev も同じ候補を選んだ");
+            Assert.True(view.JevChanges is null, "入れ替える文節は無い");
+            Assert.True(Json(view).Contains("\"jev\":\"kept\""), Json(view));
+        }
+        var failing = new JevRankerTests.FakeJev { Reply = _ => (System.Net.HttpStatusCode.InternalServerError, "") };
+        using (var failed = new JevRanker("key", failing))
+        {
+            var view = FirstSpace(failed);
+            Assert.Equal(JevResult.Failed, view.Jev, "答えが無かった");
+            Assert.True(Json(view).Contains("\"jev\":\"failed\""), Json(view));
+        }
+
+        // 聞かなかったとき (Jev を使わない・← で変換を始めた)、2 回目の Space からは入れない
+        var off = FirstSpace(null);
+        Assert.True(off.Jev is null && !Json(off).Contains("\"jev\""), "Jev を使わなければ入れない");
+        using var jev = new JevRanker("key", SoccerJev());
+        var arrow = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: jev);
+        arrow.Type("watashihakyousakka-woshimasu");
+        arrow.Press(VirtualKeys.Left);
+        Assert.True(arrow.Host.View!.Converting && arrow.Host.View.Jev is null, "← で始めたときは聞かない");
+        var k = new Keyboard(converter: JevConverter(), moreCandidates: JevMoreCandidates, jev: jev);
+        k.Type("watashihakyousakka-woshimasu ");
+        Assert.Equal(JevResult.Changed, k.Host.View!.Jev);
+        k.Type(" ");
+        Assert.True(k.Host.View!.Jev is null, "2 回目の Space では入れない");
     }
 
     [Test]
@@ -4746,7 +4797,8 @@ internal static class CompositionTests
         var english = clauses.ToList().IndexOf("google");
         Assert.True(english > 0, "英語の文節がある: " + string.Join("|", clauses));
         using var body = System.Text.Json.JsonDocument.Parse(Posts(fake).Single().Body!);
-        Assert.Equal("日本語入力で変換中の文: きょうはgoogleでけんさくする", body.RootElement.GetProperty("state").GetString(), "英語の文節も (打ったまま) 文に入れる");
+        var state = body.RootElement.GetProperty("state").GetString()!;
+        Assert.True(state.EndsWith(": きょうはgoogleでけんさくする"), "英語の文節も (打ったまま) 文に入れる: " + state);
         var asked = body.RootElement.GetProperty("questions").EnumerateObject().Select(q => q.Name).ToList();
         Assert.True(!asked.Contains("c" + english), "英語の文節は聞かない: " + string.Join(",", asked));
         Assert.True(asked.Count > 0, "日本語の文節は聞く");

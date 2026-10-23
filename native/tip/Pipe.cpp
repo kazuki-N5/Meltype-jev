@@ -3,6 +3,8 @@
 
 #include "Pipe.h"
 
+#include <algorithm>
+
 #include <aclapi.h>
 #include <sddl.h>
 
@@ -172,11 +174,20 @@ void PipeClient::Close() {
     }
 }
 
-bool PipeClient::Wait(OVERLAPPED& overlapped, DWORD timeoutMs, DWORD& transferred) {
-    if (WaitForSingleObject(event_, timeoutMs) != WAIT_OBJECT_0) {
-        CancelIoEx(pipe_, &overlapped);
-        GetOverlappedResult(pipe_, &overlapped, &transferred, TRUE);
-        return false;
+bool PipeClient::Wait(OVERLAPPED& overlapped, DWORD timeoutMs, DWORD& transferred, const std::function<void()>& waiting) {
+    ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    while (true) {
+        ULONGLONG now = GetTickCount64();
+        DWORD left = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+        DWORD slice = waiting ? std::min(left, kWaitSliceMs) : left;
+        DWORD result = WaitForSingleObject(event_, slice);
+        if (result == WAIT_OBJECT_0) break;
+        if (result != WAIT_TIMEOUT || slice == left) {
+            CancelIoEx(pipe_, &overlapped);
+            GetOverlappedResult(pipe_, &overlapped, &transferred, TRUE);
+            return false;
+        }
+        waiting();
     }
     return GetOverlappedResult(pipe_, &overlapped, &transferred, FALSE) != FALSE || GetLastError() == ERROR_MORE_DATA;
 }
@@ -194,7 +205,7 @@ void PipeClient::TimedOut(bool optional) {
     lastTimeout_ = now;
 }
 
-bool PipeClient::Transact(const std::string& request, std::string& response, DWORD timeoutMs, bool optional) {
+bool PipeClient::Transact(const std::string& request, std::string& response, DWORD timeoutMs, bool optional, const std::function<void()>& waiting) {
     response.clear();
     // 前からのつながりを使う (Meltype.exe を起動し直していたら、書き込みで切れていたと分かる)
     bool reused = pipe_ != INVALID_HANDLE_VALUE;
@@ -217,11 +228,11 @@ bool PipeClient::Transact(const std::string& request, std::string& response, DWO
         // 送り直さないと、起動し直した後の最初のキーが、応答が無いときと同じく打った文字のまま入る
         if (reused && (error == ERROR_NO_DATA || error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED)) {
             TipLog(L"つなぎ直して送り直します");
-            return Transact(request, response, remaining(), optional);
+            return Transact(request, response, remaining(), optional, waiting);
         }
         return false;
     }
-    if (!Wait(overlapped, remaining(), transferred)) {
+    if (!Wait(overlapped, remaining(), transferred, waiting)) {
         TipLog(L"パイプへの書き込みが終わりません");
         TimedOut(optional);
         return false;
@@ -241,7 +252,7 @@ bool PipeClient::Transact(const std::string& request, std::string& response, DWO
             retryAfter_ = GetTickCount64() + 2000;
             return false;
         }
-        if (!Wait(overlapped, remaining(), transferred)) {
+        if (!Wait(overlapped, remaining(), transferred, waiting)) {
             TipLog(L"Meltype.exe の応答が時間内に来ません");
             TimedOut(optional);
             return false;

@@ -130,16 +130,16 @@ internal sealed class CompositionWindow : PopupForm
     }
     private CompositionView? _view;
     private readonly ColorTextRenderer _color = new();
-    private readonly JevGlow _glow;
-    /// <summary>光らせ始めたときの表示。文字・文節が変わったら光を消す。</summary>
-    private CompositionView? _glowView;
+    private readonly JevMorph _morph;
+    /// <summary>入れ替えて見せ始めたときの表示。文字・文節が変わったらすぐにやめる。</summary>
+    private CompositionView? _morphView;
 
     public CompositionWindow()
     {
         BackColor = Background;
         Size = new Size(200, 40);
         _meaningTimer.Tick += (_, _) => ShowMeaning();
-        _glow = new JevGlow(this);
+        _morph = new JevMorph(this);
     }
 
     /// <summary>表示内容を更新する。anchor は表示位置 (キャレットの左下)。null なら今の位置のまま。</summary>
@@ -154,7 +154,7 @@ internal sealed class CompositionWindow : PopupForm
     {
         var previous = _view;
         _view = view;
-        UpdateGlow(previous, view);
+        UpdateMorph(previous, view);
         var size = Measure(view);
         if (anchor is not null) _above = above ? (anchor.Value.Y, belowY) : null;
         var location = anchor ?? Location;
@@ -171,15 +171,15 @@ internal sealed class CompositionWindow : PopupForm
     }
 
     /// <summary>
-    /// Jev が変えた文節が入った表示が来たら (前の表示には無かったときだけ) 光らせる。同じ表示が続いても光らせ直さない。
-    /// 文字や文節の区切りが変わったら、光をすぐに消す。
+    /// Jev が変えた文節が入った表示が来たら (前の表示には無かったときだけ)、変える前の候補から入れ替えて見せる。同じ表示が続いても見せ直さない。
+    /// 文字や文節の区切りが変わったら、すぐにやめる。
     /// </summary>
-    private void UpdateGlow(CompositionView? previous, CompositionView view)
+    private void UpdateMorph(CompositionView? previous, CompositionView view)
     {
-        if (_glow.Running && _glowView is { } shown && (shown.Text != view.Text || !SameClauses(shown.Clauses, view.Clauses))) _glow.Stop();
-        if (view.JevClauses is not { Count: > 0 } || previous?.JevClauses is { Count: > 0 }) return;
-        _glowView = view;
-        _glow.Start();
+        if (_morph.Running && _morphView is { } shown && (shown.Text != view.Text || !SameClauses(shown.Clauses, view.Clauses))) _morph.Stop();
+        if (view.JevChanges is not { Count: > 0 } changes || previous?.JevChanges is { Count: > 0 }) return;
+        _morphView = view;
+        _morph.Start(changes);
     }
 
     private static bool SameClauses(IReadOnlyList<string>? a, IReadOnlyList<string>? b) =>
@@ -253,7 +253,7 @@ internal sealed class CompositionWindow : PopupForm
         _meaningTimer.Stop();
         _meaningKey = null;
         _meaningPopup?.Hide();
-        _glow.Stop();
+        _morph.Stop();
     }
 
     /// <summary>候補の意味を出す小さな枠 (フォーカスを奪わない)。</summary>
@@ -306,7 +306,10 @@ internal sealed class CompositionWindow : PopupForm
         var width = TextRenderer.MeasureText(g, view.Text, _textFont).Width + 20;
         if (view.Clauses is { Count: > 0 } clauses)
         {
-            var clausesWidth = clauses.Sum(c => TextRenderer.MeasureText(g, c, _textFont, Size.Empty, TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding).Width + 4);
+            const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
+            // 入れ替えている文節は、変える前の候補のほうが広ければその幅を取る
+            var clausesWidth = clauses.Select((c, i) => Math.Max(TextRenderer.MeasureText(g, c, _textFont, Size.Empty, flags).Width,
+                _morph.From(i) is { } from ? TextRenderer.MeasureText(g, from, _textFont, Size.Empty, flags).Width : 0) + 4).Sum();
             width = Math.Max(width, clausesWidth + 20);
         }
         var height = _textFont.Height + 16;
@@ -357,29 +360,30 @@ internal sealed class CompositionWindow : PopupForm
         if (view.Clauses is { Count: > 0 } clauses)
         {
             // 変換中: 文節ごとに下線を引き、選択中の文節は背景を付けて太線にする。
+            // Jev が変えた文節は、変える前の候補から入れ替えて見せる (その間の幅は前の候補の幅から今の候補の幅へ動き、後ろの文節が寄る)。
             const TextFormatFlags flags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
-            var glowing = _glow.Running ? _glowView?.JevClauses : null;
-            List<RectangleF>? glowRects = null;
             var x = 10;
             for (var i = 0; i < clauses.Count; i++)
             {
-                var width = TextRenderer.MeasureText(g, clauses[i], _textFont, Size.Empty, flags).Width;
+                var textWidth = TextRenderer.MeasureText(g, clauses[i], _textFont, Size.Empty, flags).Width;
+                var from = _morph.From(i);
+                var fromWidth = from is null ? textWidth : TextRenderer.MeasureText(g, from, _textFont, Size.Empty, flags).Width;
+                var width = from is null ? textWidth : _morph.Width(fromWidth, textWidth);
                 var selected = i == view.SelectedClause;
+                var back = selected ? Blend(Background, Color.FromArgb(90, Accent)) : Background;
                 if (selected)
                 {
                     using var highlight = new SolidBrush(Color.FromArgb(90, Accent));
                     g.FillRectangle(highlight, x - 1, y - 1, width + 2, _textFont.Height + 2);
                 }
-                DrawText(g, clauses[i], _textFont, new Point(x, y), _palette.Text, selected ? Blend(Background, Color.FromArgb(90, Accent)) : Background, flags);
+                if (from is null || _morph.Settling) DrawText(g, clauses[i], _textFont, new Point(x, y), _palette.Text, back, flags);
+                if (from is not null) _morph.Paint(g, from, clauses[i], _textFont, new Point(x, y), fromWidth, textWidth, _palette.Text);
                 using (var underline = new Pen(selected ? Accent : _palette.Underline, selected ? 3 : 1))
                 {
                     g.DrawLine(underline, x + 1, y + _textFont.Height + 1, x + width - 2, y + _textFont.Height + 1);
                 }
-                if (glowing is not null && glowing.Contains(i)) (glowRects ??= new List<RectangleF>()).Add(new RectangleF(x - 1, y - 1, width + 2, _textFont.Height + 2));
                 x += width + 4;
             }
-            // Jev が変えた文節の光は、文字の上に重ねる (大きさは文字の高さに合わせて、DPI・倍率に追従させる)
-            if (glowRects is not null) _glow.Paint(g, glowRects, _textFont.Height / 23F);
             y += _textFont.Height + 8;
         }
         else
@@ -513,7 +517,7 @@ internal sealed class CompositionWindow : PopupForm
             _hintFont.Dispose();
             _color.Dispose();
             _meaningTimer.Dispose();
-            _glow.Dispose();
+            _morph.Dispose();
             _meaningPopup?.Dispose();
         }
         base.Dispose(disposing);

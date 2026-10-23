@@ -19,18 +19,12 @@ public sealed record JevQuestion(int Index, string Reading, IReadOnlyList<(strin
 /// Jev (TypeSafe の決定モデル) に、文節ごとにどの候補が正しいかを 1 回で聞く。問い合わせ先は OpenRouter (/api/alpha/decisions) か
 /// TypeSafe 公式 (/v1/systemone)。どちらも送る JSON・答えの形は同じで、URL とモデル名だけが違う。
 /// UI スレッドから呼ぶ。待つのは渡した時間まで。間に合わなかった答えは控えに入れ、同じ文をもう一度変換したときに使う。
+/// 失敗 (時間切れ・混雑・キーが使えない・通信エラーなど) しても休まず止めず、次に聞かれたらまた送る。
 /// </summary>
 public sealed class JevRanker : IDisposable
 {
     // 控えの数 (ZenzaiConverter.MaxCache と同じ)
     private const int MaxCache = 256;
-    // 2 回続けて時間切れになったら休む (ZenzaiConverter.BackoffMs と同じ)
-    private const int TimeoutsBeforeBackoff = 2;
-    private const int TimeoutBackoffMs = 5000;
-    // 429 / 529 (混雑) のとき休む (GitHubIssueTitles.RetryAfter と同じ)
-    private const int BusyBackoffMs = 60_000;
-    // 通信エラー・読めない応答がこれだけ続いたら止める (ZenzaiConverter と同じ)
-    private const int MaxFailures = 3;
     // 接続を温め直す間隔。接続の使い回しの期限 (PooledConnectionIdleTimeout) より短く
     private const int WarmUpIntervalMs = 60_000;
 
@@ -47,11 +41,7 @@ public sealed class JevRanker : IDisposable
     private readonly Dictionary<string, IReadOnlyDictionary<int, string>> _cache = new(StringComparer.Ordinal);
     // 送る JSON → 送っている途中の問い合わせ (同じものを 2 度送らない)
     private readonly Dictionary<string, Task<IReadOnlyDictionary<int, string>?>> _pending = new(StringComparer.Ordinal);
-    private int _timeouts;
-    private int _failures;
-    private long _pausedUntil = long.MinValue;
     private long? _lastSent;
-    private volatile bool _disabled;
     private volatile bool _disposed;
 
     public JevRanker(JevProvider provider, string apiKey) : this(apiKey, new SocketsHttpHandler
@@ -79,8 +69,8 @@ public sealed class JevRanker : IDisposable
         _ => (new Uri("https://openrouter.ai/api/alpha/decisions"), "typesafe/jev-1.14"),
     };
 
-    /// <summary>使えるか (キーが違う・クレジットが無い・失敗が続いたら false)。</summary>
-    public bool IsAvailable => !_disabled && !_disposed;
+    /// <summary>使えるか (捨てた後は false)。失敗しても false にはしない。</summary>
+    public bool IsAvailable => !_disposed;
 
     /// <summary>文節の番号 → Jev が一番上に選んだ候補。reading は変換中の文の読み。答えが無い・間に合わない・使えないときは null。</summary>
     public IReadOnlyDictionary<int, string>? Choose(string reading, IReadOnlyList<JevQuestion> questions, TimeSpan timeout)
@@ -92,11 +82,6 @@ public sealed class JevRanker : IDisposable
         Task<IReadOnlyDictionary<int, string>?>? task;
         lock (_gate)
         {
-            if (_now() < _pausedUntil)
-            {
-                Report("休み中");
-                return null;
-            }
             if (_cache.TryGetValue(key, out var cached))
             {
                 Report("控え");
@@ -112,14 +97,6 @@ public sealed class JevRanker : IDisposable
         if (!task.Wait(timeout < TimeSpan.Zero ? TimeSpan.Zero : timeout))
         {
             // 届いた答えは Send の中で控えに入れる (同じ文をもう一度変換したときに使う)
-            lock (_gate)
-            {
-                if (++_timeouts >= TimeoutsBeforeBackoff)
-                {
-                    _timeouts = 0;
-                    _pausedUntil = _now() + TimeoutBackoffMs;
-                }
-            }
             Report("時間切れ");
             return null;
         }
@@ -129,7 +106,6 @@ public sealed class JevRanker : IDisposable
             Report("失敗");
             return null;
         }
-        lock (_gate) _timeouts = 0;
         Report($"答えあり ({picks.Count} 文節)");
         return picks;
 
@@ -144,7 +120,7 @@ public sealed class JevRanker : IDisposable
         lock (_gate)
         {
             var now = _now();
-            if (now < _pausedUntil || _lastSent is { } last && now - last < WarmUpIntervalMs) return;
+            if (_lastSent is { } last && now - last < WarmUpIntervalMs) return;
             _lastSent = now;
         }
         _ = Task.Run(async () =>
@@ -186,12 +162,12 @@ public sealed class JevRanker : IDisposable
                 foreach (var (text, whole) in question.Options.DistinctBy(o => o.Text).OrderBy(o => o.Text, StringComparer.Ordinal))
                     json.WriteString(text, whole);
                 json.WriteEndObject();
-                json.WriteString("instructions", $"変換中の文の「{question.Reading}」の部分を、自然で正しい日本語として書いた文はどれか");
+                json.WriteString("instructions", $"「{question.Reading}」の部分を、自然な変換にした文はどれか");
                 json.WriteString("type", "choice");
                 json.WriteEndObject();
             }
             json.WriteEndObject();
-            json.WriteString("state", "日本語入力で変換中の文: " + reading);
+            json.WriteString("state", "日本語入力で変換中の文の読み (すべてひらがな表記): " + reading);
             json.WriteEndObject();
         }
         return buffer.WrittenSpan.ToArray();
@@ -199,7 +175,7 @@ public sealed class JevRanker : IDisposable
 
     private static string Id(int index) => "c" + index;
 
-    /// <summary>送って答えを読む。結果 (状態コード・答え) はここで控え・回数に入れるので、時間切れで待つのをやめた後に届いても使える。</summary>
+    /// <summary>送って答えを読む。答えはここで控えに入れるので、時間切れで待つのをやめた後に届いても使える。</summary>
     private Task<IReadOnlyDictionary<int, string>?> Send(string key, byte[] body, IReadOnlyList<JevQuestion> questions) => Task.Run(async () =>
     {
         HttpStatusCode? status = null;
@@ -254,32 +230,18 @@ public sealed class JevRanker : IDisposable
                 case HttpStatusCode.OK when picks is not null:
                     if (_cache.Count >= MaxCache) _cache.Clear();
                     _cache[key] = picks;
-                    _failures = 0;
                     break;
                 case HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden:
-                    Disable($"Jev: {ProviderName} の API キーが使えません ({(int)status})。Jev を使わずに変換します");
+                    Log.Warn($"Jev: {ProviderName} の API キーが使えません ({(int)status})");
                     break;
                 case HttpStatusCode.PaymentRequired:
-                    Disable($"Jev: {ProviderName} のクレジットがありません (402)。Jev を使わずに変換します");
-                    break;
-                case HttpStatusCode.TooManyRequests or (HttpStatusCode)529:
-                    _pausedUntil = _now() + BusyBackoffMs;
-                    break;
-                default:
-                    if (++_failures >= MaxFailures) Disable($"Jev: {MaxFailures} 回続けて答えが得られませんでした。Jev を使わずに変換します");
+                    Log.Warn($"Jev: {ProviderName} のクレジットがありません (402)");
                     break;
             }
         }
     }
 
     private string ProviderName => _provider == JevProvider.TypeSafe ? "TypeSafe" : "OpenRouter";
-
-    private void Disable(string message)
-    {
-        if (_disabled || _disposed) return;
-        _disabled = true;
-        Log.Warn(message);
-    }
 
     // ZenzaiConverter.Complete と同じもの。作り直しで捨てた後に届いたもの (ObjectDisposedException) も外に出さない
     private static bool IsExpected(Exception ex) =>

@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "CandidateWindow.h"
-#include "GlowWindow.h"
+#include "MorphWindow.h"
 #include "Globals.h"
 #include "Json.h"
 #include "Pipe.h"
@@ -99,8 +99,8 @@ private:
     std::string PendingPassed();
     // 応答の code / english を入力モードの表示に反映する
     void ApplyMode(const JsonValue& reply);
-    // 要求を送って応答を読む。失敗したら false (optional は PipeClient::Transact と同じ)
-    bool Request(const std::string& json, JsonValue& reply, DWORD timeoutMs = 800, bool optional = false);
+    // 要求を送って応答を読む。失敗したら false (optional・waiting は PipeClient::Transact と同じ)
+    bool Request(const std::string& json, JsonValue& reply, DWORD timeoutMs = 800, bool optional = false, const std::function<void()>& waiting = {});
     // 応答を入力欄に反映する (編集セッションの中で呼ぶ)
     void Apply(TfEditCookie ec, ITfContext* context, const JsonValue& reply);
     // range の前の count 文字が expect (前に確定した文字) なら、range をそこまで広げる。違えば false
@@ -109,10 +109,14 @@ private:
     bool WriteCommit(TfEditCookie ec, ITfContext* context, ITfRange* range, const std::wstring& text);
     void ApplyComposition(TfEditCookie ec, ITfContext* context, const JsonValue& view);
     void ShowCandidates(TfEditCookie ec, ITfContext* context, const JsonValue& view);
-    // Jev が変えた文節 (view の jevClauses) を光らせる。無い → ある に変わったときだけ始め、変換中の文字が変わったら止める
-    void ShowGlow(TfEditCookie ec, ITfContext* context, const JsonValue& view);
-    // 光るのを止めて、次に jevClauses が来たらまた光らせる
-    void HideGlow();
+    // Jev が変えた文節 (view の jevChanges) を、変える前の候補から今の候補へ入れ替えて見せる。
+    // 無い → ある に変わったときだけ始め、変換中の文字が変わったら止める。
+    // Jev を待つ表示を用意していたら、view の jev で終わらせる (Jev も同じ候補を選んだら色を戻すだけ、答えが無ければ消していく)
+    void ShowJevMorph(TfEditCookie ec, ITfContext* context, const JsonValue& view);
+    // 入れ替えて見せるのを止めて、次に jevChanges が来たらまた見せる
+    void HideJevMorph();
+    // 最初の Space を送る前に、Jev を待つ表示を用意する (変換中の文字が 1 行に収まっているときだけ)。用意したら true
+    bool BeginJevThinking(TfEditCookie ec, ITfContext* context);
     void EndComposition(TfEditCookie ec);
     void SetAttribute(TfEditCookie ec, ITfContext* context, ITfRange* range, TfGuidAtom atom);
     // 未確定の内容を確定する (フォーカスが移った・英数にしたなど)。非同期の編集セッションで行う
@@ -157,6 +161,7 @@ private:
     bool directDetection_ = false; // 英数状態でもローマ字検知が有効 (Meltype.exe の応答)
     bool directEnglishWord_ = false;
     bool fullWidthSpace_ = false;  // 設定「スペースを全角で入力」(Meltype.exe の応答の fullWidthSpace。日本語入力のときは Space も受け取る)
+    bool useJev_ = false;          // 設定「Jev で変換候補を選ぶ」(Meltype.exe の応答の useJev。最初の Space の応答を待つ間に、Jev を待つ表示を出す)
     ULONGLONG lastHello_ = 0;
     bool open_ = true;
     bool codeApp_ = false;         // コードエディター・ターミナル (Meltype.exe の応答の code)
@@ -214,9 +219,9 @@ private:
     bool consumed_ = true;
 
     std::unique_ptr<CandidateWindow> candidates_;
-    std::unique_ptr<GlowWindow> glow_;
-    bool lastJev_ = false;         // 前の表示に Jev が変えた文節があった (光らせるのは、無い → ある に変わったときだけ)
-    std::wstring glowText_;        // 光らせ始めたときの変換中の文字 (変わったら止める)
+    std::unique_ptr<MorphWindow> morph_;
+    bool lastJev_ = false;         // 前の表示に Jev が変えた文節があった (見せるのは、無い → ある に変わったときだけ)
+    std::wstring morphText_;       // 見せ始めたときの変換中の文字 (変わったら止める)
     LangBarButton* langBar_ = nullptr;
 };
 
